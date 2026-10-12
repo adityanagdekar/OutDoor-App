@@ -25,7 +25,7 @@ struct WelcomeView: View {
             Spacer()
 
             NavigationLink("START") {
-                ChallengesView()
+                SessionView()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)

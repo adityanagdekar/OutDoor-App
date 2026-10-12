@@ -17,3 +17,6 @@ Package.resolved
 # Xcode generated files
 *.xccheckout
 *.xcscmblueprint
+
+# Images
+/OutDoor/Images
