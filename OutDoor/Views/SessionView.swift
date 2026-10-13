@@ -4,35 +4,43 @@ import UIKit
 struct SessionView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    @State private var locationService = LocationService()
-    @State private var hasStartedSession = false
+    @State private var sessionService = OutdoorSessionService()
     @State private var isShowingChallenges = false
+
+    private var hasStartedSession: Bool {
+        sessionService.sessionState != .ready
+    }
 
     var body: some View {
         ZStack {
-            SessionMapView(locationService: locationService)
+            SessionMapView(locationService: sessionService.locationService)
                 .ignoresSafeArea(edges: .bottom)
 
             VStack(spacing: 12) {
                 SessionStatusBanner(
                     hasStartedSession: hasStartedSession,
-                    state: locationService.trackingState,
-                    horizontalAccuracy: locationService.horizontalAccuracy,
-                    errorMessage: locationService.locationError?.localizedDescription,
-                    onAllowLocation: locationService.requestWhenInUseAuthorization,
+                    state: sessionService.locationService.trackingState,
+                    gpsReliability: sessionService.gpsReliability,
+                    activeDistanceSource: sessionService.activeDistanceSource,
+                    motionFallbackAvailability: sessionService.motionFallbackAvailability,
+                    horizontalAccuracy: sessionService.locationService.horizontalAccuracy,
+                    errorMessage: sessionService.locationService.locationError?.localizedDescription,
+                    onAllowLocation: sessionService.requestLocationAuthorization,
                     onOpenSettings: openSettings,
-                    onRetry: locationService.retryLocationUpdates
+                    onRetry: sessionService.retryLocationUpdates
                 )
 
                 Spacer()
 
                 SessionControls(
                     hasStartedSession: hasStartedSession,
-                    state: locationService.trackingState,
-                    distance: locationService.totalDistance,
-                    onStart: startSession,
-                    onPause: locationService.pauseSession,
-                    onResume: locationService.resumeSession,
+                    state: sessionService.locationService.trackingState,
+                    sessionState: sessionService.sessionState,
+                    activeDistanceSource: sessionService.activeDistanceSource,
+                    distance: sessionService.displayedDistance,
+                    onStart: sessionService.startSession,
+                    onPause: sessionService.pauseSession,
+                    onResume: sessionService.resumeSession,
                     onShowChallenges: { isShowingChallenges = true },
                     onEnd: endSession,
                     onDone: dismiss.callAsFunction
@@ -42,25 +50,18 @@ struct SessionView: View {
         }
         .navigationTitle("Outdoor Session")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(locationService.trackingState != .completed)
+        .navigationBarBackButtonHidden(sessionService.sessionState != .completed)
         .sheet(isPresented: $isShowingChallenges) {
             ChallengesSheet()
+        }
+        .onAppear {
+            sessionService.requestMapLocation()
         }
         .onChange(of: scenePhase) {
             handleScenePhaseChange()
         }
         .onDisappear {
             abandonSessionIfNeeded()
-        }
-    }
-
-    /// Starts tracking only after the user explicitly taps Start.
-    private func startSession() {
-        hasStartedSession = true
-        locationService.startSession()
-
-        if locationService.authorizationStatus == .notDetermined {
-            locationService.requestWhenInUseAuthorization()
         }
     }
 
@@ -71,33 +72,28 @@ struct SessionView: View {
             return
         }
 
-        locationService.endSession()
+        sessionService.endSession()
     }
 
-    /// Pauses active GPS work when the app is no longer visible.
+    /// Pauses both foreground sensor streams when the app enters the background.
     private func handleScenePhaseChange() {
-        guard scenePhase == .background else {
+        guard scenePhase == .background,
+              sessionService.sessionState == .active else {
             return
         }
 
-        switch locationService.trackingState {
-        case .waitingForAccurateFix, .tracking:
-            locationService.pauseSession()
-        case .permissionNotRequested, .permissionDenied, .permissionRestricted,
-             .locationUnavailable, .paused, .completed:
-            break
-        }
+        sessionService.pauseSession()
     }
 
     /// Ends a session when leaving this screen, except during challenge presentation.
     private func abandonSessionIfNeeded() {
         guard hasStartedSession,
               !isShowingChallenges,
-              locationService.trackingState != .completed else {
+              sessionService.sessionState != .completed else {
             return
         }
 
-        locationService.endSession()
+        sessionService.endSession()
     }
 
     private func openSettings() {
@@ -112,6 +108,9 @@ struct SessionView: View {
 private struct SessionStatusBanner: View {
     let hasStartedSession: Bool
     let state: TrackingState
+    let gpsReliability: GPSReliability
+    let activeDistanceSource: DistanceSource?
+    let motionFallbackAvailability: OutdoorSessionService.MotionFallbackAvailability
     let horizontalAccuracy: CLLocationAccuracy?
     let errorMessage: String?
     let onAllowLocation: () -> Void
@@ -133,7 +132,28 @@ private struct SessionStatusBanner: View {
 
     @ViewBuilder
     private var statusContent: some View {
-        switch state {
+        if isLimitedTracking {
+            StatusMessage(
+                icon: "exclamationmark.triangle",
+                title: "Limited Distance Tracking",
+                message: "GPS is not reliable and Motion & Fitness fallback is unavailable. Distance will remain unchanged until reliable GPS returns."
+            )
+        } else if isUsingPedometerFallback {
+            StatusMessage(
+                icon: "figure.walk.motion",
+                title: "Motion Fallback Active",
+                message: "GPS is currently unreliable. Motion & Fitness is estimating distance until GPS recovers."
+            )
+        } else if isAcquiringGPS {
+            StatusMessage(
+                icon: "location.magnifyingglass",
+                title: "Acquiring GPS",
+                message: accuracyMessage
+            ) {
+                ProgressView()
+            }
+        } else {
+            switch state {
         case .permissionNotRequested:
             StatusMessage(
                 icon: "location",
@@ -170,7 +190,7 @@ private struct SessionStatusBanner: View {
         case .waitingForAccurateFix:
             StatusMessage(
                 icon: "location.magnifyingglass",
-                title: "Finding Your Location",
+                title: "Acquiring GPS",
                 message: accuracyMessage
             ) {
                 ProgressView()
@@ -178,8 +198,8 @@ private struct SessionStatusBanner: View {
         case .tracking:
             StatusMessage(
                 icon: "location.fill",
-                title: "Tracking Session",
-                message: "Your accepted GPS route and distance are updating live."
+                title: "GPS Tracking",
+                message: "Reliable GPS is updating your route and distance."
             )
         case .paused:
             StatusMessage(
@@ -187,13 +207,34 @@ private struct SessionStatusBanner: View {
                 title: "Session Paused",
                 message: "Your route is preserved while location updates are stopped."
             )
-        case .completed:
-            StatusMessage(
-                icon: "checkmark.circle",
-                title: "Session Completed",
-                message: "Location tracking has stopped and your final route is shown."
-            )
+            case .completed:
+                StatusMessage(
+                    icon: "checkmark.circle",
+                    title: "Session Completed",
+                    message: "Location tracking has stopped and your final route is shown."
+                )
+            }
         }
+    }
+
+    private var isLimitedTracking: Bool {
+        isLiveLocationState
+            && gpsReliability != .reliable
+            && motionFallbackAvailability == .unavailable
+    }
+
+    private var isUsingPedometerFallback: Bool {
+        isLiveLocationState && activeDistanceSource == .pedometer
+    }
+
+    private var isAcquiringGPS: Bool {
+        isLiveLocationState
+            && gpsReliability != .reliable
+            && activeDistanceSource != .pedometer
+    }
+
+    private var isLiveLocationState: Bool {
+        state == .waitingForAccurateFix || state == .tracking
     }
 
     private var accuracyMessage: String {
@@ -263,6 +304,8 @@ private extension StatusMessage where Accessory == EmptyView {
 private struct SessionControls: View {
     let hasStartedSession: Bool
     let state: TrackingState
+    let sessionState: OutdoorSessionService.SessionState
+    let activeDistanceSource: DistanceSource?
     let distance: CLLocationDistance
     let onStart: () -> Void
     let onPause: () -> Void
@@ -282,6 +325,11 @@ private struct SessionControls: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                     .monospacedDigit()
+
+                Text(distanceSourceLabel)
+                    .font(.caption2)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
             }
 
             controls
@@ -289,6 +337,25 @@ private struct SessionControls: View {
         .frame(maxWidth: .infinity)
         .padding()
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+    }
+
+    private var distanceSourceLabel: LocalizedStringKey {
+        if sessionState == .paused {
+            return "Paused"
+        }
+
+        if sessionState == .completed {
+            return "Final distance"
+        }
+
+        switch activeDistanceSource {
+        case .gps:
+            return "GPS"
+        case .pedometer:
+            return "Motion estimate"
+        case nil:
+            return hasStartedSession ? "Acquiring GPS" : "Not started"
+        }
     }
 
     @ViewBuilder

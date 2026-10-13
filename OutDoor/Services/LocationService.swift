@@ -20,14 +20,22 @@ final class LocationService: NSObject {
 
     private(set) var trackingState: TrackingState
     private(set) var authorizationStatus: CLAuthorizationStatus
+    private(set) var mapLocation: CLLocation?
     private(set) var latestLocation: CLLocation?
-    private(set) var routeCoordinates: [CLLocationCoordinate2D] = []
-    private(set) var totalDistance: CLLocationDistance = 0
+    private(set) var routeSegments: [RouteSegment] = []
+    private(set) var gpsRouteDistance: CLLocationDistance = 0
     private(set) var horizontalAccuracy: CLLocationAccuracy?
     private(set) var locationError: LocationError?
 
     private let locationManager: CLLocationManager
     private var isSessionActive = false
+    private var isRequestingMapLocation = false
+    private var isRouteRecordingEnabled = true
+    private var shouldReanchorAtNextReliableFix = false
+    private var lastReliabilityFix: CLLocation?
+    @ObservationIgnored var onUpdate: (() -> Void)?
+    @ObservationIgnored var onGPSFixEvaluated: ((Bool, Date) -> Void)?
+    @ObservationIgnored var onGPSFailure: (() -> Void)?
 
     /// Creates and configures the Core Location manager for foreground fitness tracking.
     override init() {
@@ -56,6 +64,21 @@ final class LocationService: NSObject {
         locationManager.requestWhenInUseAuthorization()
     }
 
+    /// Requests one foreground location fix for positioning the map without starting a session.
+    func requestMapLocation() {
+        guard !isSessionActive, CLLocationManager.locationServicesEnabled() else {
+            return
+        }
+
+        let status = locationManager.authorizationStatus
+        guard status == .authorizedWhenInUse || status == .authorizedAlways else {
+            return
+        }
+
+        isRequestingMapLocation = true
+        locationManager.requestLocation()
+    }
+
     /// Starts a new session after clearing location data from the previous session.
     func startSession() {
         stopLocationUpdates()
@@ -71,6 +94,7 @@ final class LocationService: NSObject {
         }
 
         stopLocationUpdates()
+        lastReliabilityFix = nil
         trackingState = .paused
     }
 
@@ -81,6 +105,18 @@ final class LocationService: NSObject {
         }
 
         beginTrackingIfPossible()
+    }
+
+    /// Suspends GPS route and distance recording while fixes continue for reliability checks.
+    func suspendRouteRecording() {
+        isRouteRecordingEnabled = false
+        shouldReanchorAtNextReliableFix = false
+    }
+
+    /// Resumes route recording by making the next reliable fix a zero-distance anchor.
+    func resumeRouteRecordingAtNextReliableFix() {
+        isRouteRecordingEnabled = true
+        shouldReanchorAtNextReliableFix = true
     }
 
     /// Retries location updates after a temporary availability failure.
@@ -135,6 +171,7 @@ final class LocationService: NSObject {
 
     /// Updates service state and tracking behavior after location authorization changes.
     private func handleAuthorizationChange(_ status: CLAuthorizationStatus) {
+        defer { onUpdate?() }
         authorizationStatus = status
 
         switch status {
@@ -161,30 +198,89 @@ final class LocationService: NSObject {
 
     /// Validates incoming locations and records only accepted route points.
     private func receive(_ locations: [CLLocation]) {
+        defer { onUpdate?() }
+        let now = Date()
+
+        if isRequestingMapLocation {
+            receiveMapLocation(from: locations, now: now)
+        }
+
         guard isSessionActive,
               trackingState == .waitingForAccurateFix || trackingState == .tracking else {
             return
         }
 
-        let now = Date()
-
         for location in locations {
             horizontalAccuracy = location.horizontalAccuracy
 
-            guard let segmentDistance = LocationValidator.acceptedSegmentDistance(
-                for: location,
-                after: latestLocation,
+            let isReliableFix = LocationValidator.isReliableFix(
+                location,
+                after: lastReliabilityFix,
                 now: now
-            ) else {
+            )
+            onGPSFixEvaluated?(isReliableFix, now)
+
+            if lastReliabilityFix == nil
+                || location.timestamp > lastReliabilityFix?.timestamp ?? .distantPast {
+                lastReliabilityFix = location
+            }
+
+            guard isRouteRecordingEnabled else {
                 continue
             }
 
-            totalDistance += segmentDistance
-            latestLocation = location
-            routeCoordinates.append(location.coordinate)
-            trackingState = .tracking
-            locationError = nil
+            if shouldReanchorAtNextReliableFix, isReliableFix {
+                shouldReanchorAtNextReliableFix = false
+                beginRouteSegment(at: location)
+                continue
+            }
+
+            switch LocationValidator.decision(
+                for: location,
+                after: latestLocation,
+                now: now
+            ) {
+            case .origin, .reanchor:
+                beginRouteSegment(at: location)
+            case .segment(let distance):
+                gpsRouteDistance += distance
+                latestLocation = location
+                routeSegments[routeSegments.count - 1].coordinates.append(location.coordinate)
+                markLocationAvailable()
+            case .rejected:
+                continue
+            }
         }
+    }
+
+    /// Stores one accurate location for map positioning without affecting session distance.
+    private func receiveMapLocation(from locations: [CLLocation], now: Date) {
+        guard let location = locations.reversed().first(where: {
+            if case .origin = LocationValidator.decision(for: $0, after: nil, now: now) {
+                return true
+            }
+
+            return false
+        }) else {
+            return
+        }
+
+        mapLocation = location
+        isRequestingMapLocation = false
+    }
+
+    /// Records a route anchor without adding distance from an earlier segment.
+    private func beginRouteSegment(at location: CLLocation) {
+        mapLocation = location
+        latestLocation = location
+        routeSegments.append(RouteSegment(coordinates: [location.coordinate]))
+        markLocationAvailable()
+    }
+
+    /// Marks the service as actively tracking after accepting a location.
+    private func markLocationAvailable() {
+        trackingState = .tracking
+        locationError = nil
     }
 
     /// Handles transient and terminal errors reported by Core Location.
@@ -192,6 +288,10 @@ final class LocationService: NSObject {
         code: CLError.Code?,
         message: String
     ) {
+        defer { onUpdate?() }
+        onGPSFailure?()
+        isRequestingMapLocation = false
+
         guard isSessionActive else {
             return
         }
@@ -211,8 +311,9 @@ final class LocationService: NSObject {
     /// Clears all route, distance, accuracy, and error data for a new session.
     private func resetSession() {
         latestLocation = nil
-        routeCoordinates = []
-        totalDistance = 0
+        lastReliabilityFix = nil
+        routeSegments = []
+        gpsRouteDistance = 0
         horizontalAccuracy = nil
         locationError = nil
     }
