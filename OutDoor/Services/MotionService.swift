@@ -36,8 +36,11 @@ final class MotionService {
     private(set) var authorizationStatus: CMAuthorizationStatus
     private(set) var isStepCountingAvailable: Bool
     private(set) var isDistanceAvailable: Bool
+    private(set) var isCadenceAvailable: Bool
     private(set) var stepCount = 0
     private(set) var pedometerDistance: Double = 0
+    private(set) var currentCadence: Double?
+    private(set) var lastUpdateDate: Date?
     private(set) var motionError: MotionError?
     private(set) var activityState: ActivityState = .inactive
 
@@ -55,6 +58,7 @@ final class MotionService {
         authorizationStatus = CMPedometer.authorizationStatus()
         isStepCountingAvailable = CMPedometer.isStepCountingAvailable()
         isDistanceAvailable = CMPedometer.isDistanceAvailable()
+        isCadenceAvailable = CMPedometer.isCadenceAvailable()
     }
 
     /// Triggers the system Motion & Fitness permission prompt when authorization is undecided.
@@ -148,12 +152,16 @@ final class MotionService {
         pedometer.startUpdates(from: startDate) { [weak self] data, error in
             let steps = data?.numberOfSteps.intValue
             let measuredDistance = data?.distance?.doubleValue
+            let cadence = data?.currentCadence?.doubleValue
+            let updateDate = data?.endDate
             let message = error?.localizedDescription
 
             Task { @MainActor in
                 self?.receive(
                     steps: steps,
                     distance: measuredDistance,
+                    cadence: cadence,
+                    updateDate: updateDate,
                     errorMessage: message,
                     generation: generation
                 )
@@ -165,6 +173,8 @@ final class MotionService {
     private func receive(
         steps: Int?,
         distance measuredDistance: Double?,
+        cadence: Double?,
+        updateDate: Date?,
         errorMessage: String?,
         generation: Int
     ) {
@@ -186,6 +196,8 @@ final class MotionService {
         intervalDistance = max(measuredDistance ?? 0, 0)
         stepCount = committedStepCount + intervalStepCount
         pedometerDistance = committedDistance + intervalDistance
+        currentCadence = cadence.map { max($0, 0) }
+        lastUpdateDate = updateDate
         motionError = nil
         onUpdate?()
     }
@@ -214,6 +226,8 @@ final class MotionService {
         intervalDistance = 0
         stepCount = 0
         pedometerDistance = 0
+        currentCadence = nil
+        lastUpdateDate = nil
         motionError = nil
         activityState = .inactive
     }

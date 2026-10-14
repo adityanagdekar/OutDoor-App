@@ -51,6 +51,21 @@ final class OutdoorSessionService {
     /// Longest allowed foreground interval without a healthy GPS fix.
     static let maximumTimeWithoutGoodFix: TimeInterval = 12
 
+    /// Default verified-walking goal: 30 minutes.
+    static let defaultGoalDuration: TimeInterval = 30 * 60
+
+    /// Maximum age of a pedometer sample used as live movement evidence.
+    static let maximumMotionUpdateAge: TimeInterval = 5
+
+    /// Time without fresh walking evidence before the session becomes stationary.
+    static let movementEvidenceTimeout: TimeInterval = 8
+
+    /// Smallest forward pedometer distance change treated as movement.
+    static let minimumMovementDistance: Double = 0.5
+
+    /// Smallest positive live cadence treated as walking, in steps per second.
+    static let minimumWalkingCadence: Double = 0.2
+
     let locationService: LocationService
     let motionService: MotionService
 
@@ -62,15 +77,36 @@ final class OutdoorSessionService {
     private(set) var pedometerBaseline: Double = 0
     private(set) var completedIntervals: [DistanceInterval] = []
     private(set) var gpsReliability: GPSReliability = .acquiring
+    private(set) var walkingActivityState: WalkingActivityState = .ready
+    private(set) var elapsedSessionTime: TimeInterval = 0
+    private(set) var verifiedWalkingTime: TimeInterval = 0
+    private(set) var stationaryTime: TimeInterval = 0
+    private(set) var goalDuration: TimeInterval = OutdoorSessionService.defaultGoalDuration
 
     private var consecutiveGoodFixes = 0
     private var consecutiveBadFixes = 0
     private var lastGoodFixDate: Date?
+    private var lastTimeAccountingDate: Date?
+    private var lastObservedStepCount = 0
+    private var lastObservedPedometerDistance: Double = 0
+    private var lastMovementEvidenceDate: Date?
     @ObservationIgnored private var reliabilityTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private var timeAccountingTask: Task<Void, Never>?
+    @ObservationIgnored private var movementTimeoutTask: Task<Void, Never>?
 
     /// Combines completed intervals with only the current interval's sensor delta.
     var displayedDistance: Double {
         committedDistance + currentIntervalDistance
+    }
+
+    /// Returns the unearned portion of the current walking-time goal.
+    var remainingTime: TimeInterval {
+        max(goalDuration - verifiedWalkingTime, 0)
+    }
+
+    /// Uses Core Motion's walking-distance estimate as secondary session information.
+    var estimatedDistance: Double {
+        motionService.pedometerDistance
     }
 
     /// Describes whether pedometer distance can cover an unreliable GPS interval.
@@ -126,13 +162,17 @@ final class OutdoorSessionService {
 
         resetDistanceIntervals()
         resetGPSReliability()
+        resetTimeMetrics()
         sessionState = .active
+        walkingActivityState = .acquiringMovement
 
         locationService.requestWhenInUseAuthorization()
         motionService.requestAuthorization()
 
         let startDate = Date()
+        beginTimeAccounting(at: startDate)
         motionService.startUpdates(from: startDate)
+        resetMovementDetection(at: startDate)
         locationService.suspendRouteRecording()
         locationService.startSession()
         evaluateDistanceSource()
@@ -144,11 +184,15 @@ final class OutdoorSessionService {
             return
         }
 
+        updateTimeAccounting(at: Date())
+        stopTimeAccounting()
+        cancelMovementTimeout()
         commitCurrentInterval()
         cancelReliabilityTimeout()
         locationService.pauseSession()
         motionService.pauseUpdates()
         sessionState = .paused
+        walkingActivityState = .paused
     }
 
     /// Resumes both sensors and requires fresh evidence of GPS reliability.
@@ -158,12 +202,15 @@ final class OutdoorSessionService {
         }
 
         sessionState = .active
+        walkingActivityState = .acquiringMovement
         activeDistanceSource = nil
         currentSourceBaseline = 0
         resetGPSReliability()
 
         let resumeDate = Date()
+        beginTimeAccounting(at: resumeDate)
         motionService.resumeUpdates(from: resumeDate)
+        resetMovementDetection(at: resumeDate)
         pedometerBaseline = motionService.pedometerDistance
         locationService.suspendRouteRecording()
         locationService.resumeSession()
@@ -177,13 +224,17 @@ final class OutdoorSessionService {
         }
 
         if sessionState == .active {
+            updateTimeAccounting(at: Date())
             commitCurrentInterval()
         }
 
+        stopTimeAccounting()
+        cancelMovementTimeout()
         cancelReliabilityTimeout()
         locationService.endSession()
         motionService.stopUpdates()
         sessionState = .completed
+        walkingActivityState = .completed
     }
 
     /// Retries GPS updates while leaving pedometer observation and interval totals intact.
@@ -208,17 +259,27 @@ final class OutdoorSessionService {
         }
 
         motionService.onUpdate = { [weak self] in
-            self?.sensorStateDidChange()
+            self?.motionStateDidChange()
         }
     }
 
-    /// Re-evaluates the active distance source whenever an owned sensor changes.
+    /// Re-evaluates GPS support state whenever location data changes.
     private func sensorStateDidChange() {
         guard sessionState == .active else {
             return
         }
 
         evaluateDistanceSource()
+    }
+
+    /// Uses fresh pedometer changes as the primary evidence of walking.
+    private func motionStateDidChange() {
+        guard sessionState == .active else {
+            return
+        }
+
+        evaluateDistanceSource()
+        evaluatePedometerMovement()
     }
 
     /// Updates consecutive-fix counters and promotes or demotes GPS reliability.
@@ -262,15 +323,13 @@ final class OutdoorSessionService {
         evaluateDistanceSource()
     }
 
-    /// Prefers GPS only after reliability is established, otherwise using pedometer distance.
+    /// Uses pedometer distance for session estimates while GPS remains supporting context.
     private func evaluateDistanceSource() {
         guard sessionState == .active else {
             return
         }
 
-        if gpsReliability == .reliable {
-            selectDistanceSource(.gps)
-        } else if isPedometerReady {
+        if isPedometerReady {
             selectDistanceSource(.pedometer)
         } else if activeDistanceSource != nil {
             commitCurrentInterval()
@@ -313,6 +372,145 @@ final class OutdoorSessionService {
         committedDistance += interval.distance
         activeDistanceSource = nil
         currentSourceBaseline = 0
+    }
+
+    /// Establishes fresh pedometer baselines for a new active tracking interval.
+    private func resetMovementDetection(at date: Date) {
+        cancelMovementTimeout()
+        lastObservedStepCount = motionService.stepCount
+        lastObservedPedometerDistance = motionService.pedometerDistance
+        lastMovementEvidenceDate = date
+        scheduleMovementTimeout(after: date)
+    }
+
+    /// Classifies fresh step, distance, or cadence changes as verified walking.
+    private func evaluatePedometerMovement(at now: Date = Date()) {
+        let stepCount = motionService.stepCount
+        let distance = motionService.pedometerDistance
+        let stepIncrease = stepCount > lastObservedStepCount
+        let distanceIncrease = distance - lastObservedPedometerDistance
+        let cadenceIndicatesWalking = (motionService.currentCadence ?? 0)
+            >= Self.minimumWalkingCadence
+        let updateIsRecent = motionService.lastUpdateDate.map {
+            abs(now.timeIntervalSince($0)) <= Self.maximumMotionUpdateAge
+        } ?? false
+
+        lastObservedStepCount = stepCount
+        lastObservedPedometerDistance = distance
+
+        guard updateIsRecent,
+              stepIncrease
+                || distanceIncrease >= Self.minimumMovementDistance
+                || cadenceIndicatesWalking else {
+            return
+        }
+
+        let evidenceDate = motionService.lastUpdateDate ?? now
+        lastMovementEvidenceDate = evidenceDate
+        setWalkingVerification(true, at: now)
+        scheduleMovementTimeout(after: evidenceDate)
+    }
+
+    /// Restarts the deadline used to identify when verified movement has stopped.
+    private func scheduleMovementTimeout(after evidenceDate: Date) {
+        cancelMovementTimeout()
+
+        movementTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.movementEvidenceTimeout))
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            self?.handleMovementTimeout(expectedEvidenceDate: evidenceDate)
+        }
+    }
+
+    /// Changes the active session to stationary when no newer movement evidence arrived.
+    private func handleMovementTimeout(expectedEvidenceDate: Date) {
+        guard sessionState == .active,
+              lastMovementEvidenceDate == expectedEvidenceDate else {
+            return
+        }
+
+        setWalkingVerification(false)
+    }
+
+    /// Cancels movement classification work while the session is not active.
+    private func cancelMovementTimeout() {
+        movementTimeoutTask?.cancel()
+        movementTimeoutTask = nil
+    }
+
+    /// Resets all time measurements before a new session begins.
+    private func resetTimeMetrics() {
+        stopTimeAccounting()
+        elapsedSessionTime = 0
+        verifiedWalkingTime = 0
+        stationaryTime = 0
+        walkingActivityState = .ready
+    }
+
+    /// Starts a foreground-only ticker for active-session time accounting.
+    private func beginTimeAccounting(at date: Date) {
+        stopTimeAccounting()
+        lastTimeAccountingDate = date
+
+        timeAccountingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                self?.updateTimeAccounting(at: Date())
+            }
+        }
+    }
+
+    /// Assigns elapsed active time to either verified walking or stationary time.
+    private func updateTimeAccounting(at date: Date) {
+        guard sessionState == .active,
+              let lastTimeAccountingDate else {
+            return
+        }
+
+        let elapsed = date.timeIntervalSince(lastTimeAccountingDate)
+
+        guard elapsed.isFinite, elapsed > 0 else {
+            return
+        }
+
+        elapsedSessionTime += elapsed
+
+        switch walkingActivityState {
+        case .walking:
+            verifiedWalkingTime += elapsed
+        case .acquiringMovement, .stationary:
+            stationaryTime += elapsed
+        case .ready, .paused, .completed:
+            break
+        }
+
+        self.lastTimeAccountingDate = date
+    }
+
+    /// Changes the walking classification without losing time at the transition.
+    func setWalkingVerification(_ isVerified: Bool, at date: Date = Date()) {
+        guard sessionState == .active else {
+            return
+        }
+
+        updateTimeAccounting(at: date)
+        walkingActivityState = isVerified ? .walking : .stationary
+    }
+
+    /// Stops the timer so paused, background, and completed time cannot be counted.
+    private func stopTimeAccounting() {
+        timeAccountingTask?.cancel()
+        timeAccountingTask = nil
+        lastTimeAccountingDate = nil
     }
 
     /// Clears source history so a new session always begins at zero distance.

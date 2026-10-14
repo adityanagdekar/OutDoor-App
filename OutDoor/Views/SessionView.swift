@@ -18,7 +18,7 @@ struct SessionView: View {
 
             VStack(spacing: 12) {
                 SessionStatusBanner(
-                    hasStartedSession: hasStartedSession,
+                    activityState: sessionService.walkingActivityState,
                     state: sessionService.locationService.trackingState,
                     gpsReliability: sessionService.gpsReliability,
                     activeDistanceSource: sessionService.activeDistanceSource,
@@ -30,14 +30,18 @@ struct SessionView: View {
                     onRetry: sessionService.retryLocationUpdates
                 )
 
+                WalkingTimeCard(
+                    verifiedWalkingTime: sessionService.verifiedWalkingTime,
+                    remainingTime: sessionService.remainingTime,
+                    goalDuration: sessionService.goalDuration
+                )
+
                 Spacer()
 
                 SessionControls(
                     hasStartedSession: hasStartedSession,
                     state: sessionService.locationService.trackingState,
-                    sessionState: sessionService.sessionState,
-                    activeDistanceSource: sessionService.activeDistanceSource,
-                    distance: sessionService.displayedDistance,
+                    distance: sessionService.estimatedDistance,
                     onStart: sessionService.startSession,
                     onPause: sessionService.pauseSession,
                     onResume: sessionService.resumeSession,
@@ -105,8 +109,45 @@ struct SessionView: View {
     }
 }
 
+private struct WalkingTimeCard: View {
+    let verifiedWalkingTime: TimeInterval
+    let remainingTime: TimeInterval
+    let goalDuration: TimeInterval
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text("Verified Walking Time")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text(formattedTime(verifiedWalkingTime))
+                .font(.title)
+                .fontWeight(.semibold)
+                .monospacedDigit()
+
+            Text("Goal \(formattedTime(goalDuration)) · \(formattedTime(remainingTime)) remaining")
+                .font(.caption2)
+                .fontWeight(.medium)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .frame(maxWidth: 240)
+        .padding()
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Formats session durations as hours and minutes.
+    private func formattedTime(_ duration: TimeInterval) -> String {
+        let totalMinutes = max(Int(duration) / 60, 0)
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        return String(format: "%02d:%02d", hours, minutes)
+    }
+}
+
 private struct SessionStatusBanner: View {
-    let hasStartedSession: Bool
+    let activityState: WalkingActivityState
     let state: TrackingState
     let gpsReliability: GPSReliability
     let activeDistanceSource: DistanceSource?
@@ -119,19 +160,44 @@ private struct SessionStatusBanner: View {
 
     @ViewBuilder
     var body: some View {
-        if !hasStartedSession {
+        switch activityState {
+        case .ready:
             StatusMessage(
                 icon: "figure.walk",
                 title: "Ready for Your Walk",
-                message: "Tap Start when you are ready to begin location tracking."
+                message: "Tap Start when you are ready to begin tracking your walk."
             )
-        } else {
-            statusContent
+        case .acquiringMovement:
+            acquiringStatusContent
+        case .walking:
+            StatusMessage(
+                icon: "figure.walk.motion",
+                title: "Walking Verified",
+                message: "Your verified walking time is increasing."
+            )
+        case .stationary:
+            StatusMessage(
+                icon: "figure.stand",
+                title: "No Movement Detected",
+                message: "Your session remains active, but stationary time does not earn usage time."
+            )
+        case .paused:
+            StatusMessage(
+                icon: "pause.circle",
+                title: "Session Paused",
+                message: "Time and sensor updates are paused until you resume."
+            )
+        case .completed:
+            StatusMessage(
+                icon: "checkmark.circle",
+                title: "Session Completed",
+                message: "Your verified walking time and estimated distance are final."
+            )
         }
     }
 
     @ViewBuilder
-    private var statusContent: some View {
+    private var acquiringStatusContent: some View {
         if isLimitedTracking {
             StatusMessage(
                 icon: "exclamationmark.triangle",
@@ -304,8 +370,6 @@ private extension StatusMessage where Accessory == EmptyView {
 private struct SessionControls: View {
     let hasStartedSession: Bool
     let state: TrackingState
-    let sessionState: OutdoorSessionService.SessionState
-    let activeDistanceSource: DistanceSource?
     let distance: CLLocationDistance
     let onStart: () -> Void
     let onPause: () -> Void
@@ -317,16 +381,16 @@ private struct SessionControls: View {
     var body: some View {
         VStack(spacing: 12) {
             VStack(spacing: 2) {
-                Text("Distance")
+                Text("Estimated Distance")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 Text("\(distance.formatted(.number.precision(.fractionLength(0)))) m")
-                    .font(.title2)
+                    .font(.headline)
                     .fontWeight(.semibold)
                     .monospacedDigit()
 
-                Text(distanceSourceLabel)
+                Text("Motion estimate")
                     .font(.caption2)
                     .fontWeight(.medium)
                     .foregroundStyle(.secondary)
@@ -337,25 +401,6 @@ private struct SessionControls: View {
         .frame(maxWidth: .infinity)
         .padding()
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
-    }
-
-    private var distanceSourceLabel: LocalizedStringKey {
-        if sessionState == .paused {
-            return "Paused"
-        }
-
-        if sessionState == .completed {
-            return "Final distance"
-        }
-
-        switch activeDistanceSource {
-        case .gps:
-            return "GPS"
-        case .pedometer:
-            return "Motion estimate"
-        case nil:
-            return hasStartedSession ? "Acquiring GPS" : "Not started"
-        }
     }
 
     @ViewBuilder
