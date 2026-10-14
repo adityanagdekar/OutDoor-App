@@ -1,4 +1,3 @@
-import CoreLocation
 import CoreMotion
 import Foundation
 import Observation
@@ -20,8 +19,8 @@ final class OutdoorSessionService {
         case completed
     }
 
-    enum MotionFallbackAvailability: Equatable {
-        /// Pedometer distance can be used when GPS becomes unreliable.
+    enum MotionAvailability: Equatable {
+        /// Pedometer data is available for walking detection and estimated distance.
         case available
 
         /// The system has not finished resolving Motion & Fitness authorization.
@@ -29,17 +28,6 @@ final class OutdoorSessionService {
 
         /// Pedometer distance cannot be used on this device or with current permission.
         case unavailable
-    }
-
-    struct DistanceInterval: Equatable {
-        let source: DistanceSource
-        let baseline: Double
-        let endReading: Double
-
-        /// Returns only the forward distance measured during this source interval.
-        var distance: Double {
-            max(endReading - baseline, 0)
-        }
     }
 
     /// Number of sequential healthy fixes required before GPS supplies distance.
@@ -76,12 +64,6 @@ final class OutdoorSessionService {
     let motionService: MotionService
 
     private(set) var sessionState: SessionState = .ready
-    private(set) var activeDistanceSource: DistanceSource?
-    private(set) var committedDistance: Double = 0
-    private(set) var currentSourceBaseline: Double = 0
-    private(set) var gpsBaseline: Double = 0
-    private(set) var pedometerBaseline: Double = 0
-    private(set) var completedIntervals: [DistanceInterval] = []
     private(set) var gpsReliability: GPSReliability = .acquiring
     private(set) var walkingActivityState: WalkingActivityState = .ready
     private(set) var shouldShowInactivityActions = false
@@ -104,11 +86,6 @@ final class OutdoorSessionService {
     @ObservationIgnored private var stationaryWarningTask: Task<Void, Never>?
     @ObservationIgnored private var prolongedInactivityTask: Task<Void, Never>?
 
-    /// Combines completed intervals with only the current interval's sensor delta.
-    var displayedDistance: Double {
-        committedDistance + currentIntervalDistance
-    }
-
     /// Returns the unearned portion of the current walking-time goal.
     var remainingTime: TimeInterval {
         max(goalDuration - verifiedWalkingTime, 0)
@@ -119,8 +96,8 @@ final class OutdoorSessionService {
         motionService.pedometerDistance
     }
 
-    /// Describes whether pedometer distance can cover an unreliable GPS interval.
-    var motionFallbackAvailability: MotionFallbackAvailability {
+    /// Describes whether Core Motion can verify walking and estimate distance.
+    var motionAvailability: MotionAvailability {
         guard motionService.isDistanceAvailable else {
             return .unavailable
         }
@@ -164,13 +141,12 @@ final class OutdoorSessionService {
         locationService.requestWhenInUseAuthorization()
     }
 
-    /// Requests permissions, starts both sensors, and begins acquiring GPS reliability.
+    /// Requests permissions and starts a fresh foreground walking session.
     func startSession() {
         guard sessionState == .ready || sessionState == .completed else {
             return
         }
 
-        resetDistanceIntervals()
         resetGPSReliability()
         resetTimeMetrics()
         sessionState = .active
@@ -184,10 +160,9 @@ final class OutdoorSessionService {
         motionService.startUpdates(from: startDate)
         resetMovementDetection(at: startDate)
         locationService.startSession()
-        evaluateDistanceSource()
     }
 
-    /// Commits the current interval and pauses both sensor services.
+    /// Accounts through the pause timestamp, then pauses both sensor services.
     func pauseSession() {
         guard sessionState == .active else {
             return
@@ -196,7 +171,6 @@ final class OutdoorSessionService {
         updateTimeAccounting(at: Date())
         stopTimeAccounting()
         cancelMovementTimeout()
-        commitCurrentInterval()
         cancelReliabilityTimeout()
         locationService.pauseSession()
         motionService.pauseUpdates()
@@ -204,7 +178,7 @@ final class OutdoorSessionService {
         walkingActivityState = .paused
     }
 
-    /// Resumes both sensors and requires fresh evidence of GPS reliability.
+    /// Resumes both sensors with fresh movement baselines and GPS acquisition.
     func resumeSession() {
         guard sessionState == .paused else {
             return
@@ -212,20 +186,16 @@ final class OutdoorSessionService {
 
         sessionState = .active
         walkingActivityState = .acquiringMovement
-        activeDistanceSource = nil
-        currentSourceBaseline = 0
         resetGPSReliability()
 
         let resumeDate = Date()
         beginTimeAccounting(at: resumeDate)
         motionService.resumeUpdates(from: resumeDate)
         resetMovementDetection(at: resumeDate)
-        pedometerBaseline = motionService.pedometerDistance
         locationService.resumeSession()
-        evaluateDistanceSource()
     }
 
-    /// Commits the final interval and stops both sensor streams.
+    /// Finalizes earned walking time and stops both sensor streams.
     func endSession() {
         guard sessionState == .active || sessionState == .paused else {
             return
@@ -233,7 +203,6 @@ final class OutdoorSessionService {
 
         if sessionState == .active {
             updateTimeAccounting(at: Date())
-            commitCurrentInterval()
         }
 
         stopTimeAccounting()
@@ -259,15 +228,10 @@ final class OutdoorSessionService {
     func retryLocationUpdates() {
         resetGPSReliability()
         locationService.retryLocationUpdates()
-        evaluateDistanceSource()
     }
 
     /// Connects sensor samples and failures to coordinator-owned reliability decisions.
     private func configureSensorCallbacks() {
-        locationService.onUpdate = { [weak self] in
-            self?.sensorStateDidChange()
-        }
-
         locationService.onGPSFixEvaluated = { [weak self] isGoodFix, observedAt in
             self?.recordGPSFix(isGood: isGoodFix, observedAt: observedAt)
         }
@@ -281,22 +245,12 @@ final class OutdoorSessionService {
         }
     }
 
-    /// Re-evaluates GPS support state whenever location data changes.
-    private func sensorStateDidChange() {
-        guard sessionState == .active else {
-            return
-        }
-
-        evaluateDistanceSource()
-    }
-
     /// Uses fresh pedometer changes as the primary evidence of walking.
     private func motionStateDidChange() {
         guard sessionState == .active else {
             return
         }
 
-        evaluateDistanceSource()
         evaluatePedometerMovement()
     }
 
@@ -322,7 +276,6 @@ final class OutdoorSessionService {
             return
         }
 
-        evaluateDistanceSource()
     }
 
     /// Counts one unhealthy fix or location error toward making GPS unreliable.
@@ -338,56 +291,6 @@ final class OutdoorSessionService {
             gpsReliability = .unreliable
         }
 
-        evaluateDistanceSource()
-    }
-
-    /// Uses pedometer distance for session estimates while GPS remains supporting context.
-    private func evaluateDistanceSource() {
-        guard sessionState == .active else {
-            return
-        }
-
-        if isPedometerReady {
-            selectDistanceSource(.pedometer)
-        } else if activeDistanceSource != nil {
-            commitCurrentInterval()
-        }
-    }
-
-    /// Ends the previous interval before beginning a new source at its current reading.
-    private func selectDistanceSource(_ source: DistanceSource) {
-        guard source != activeDistanceSource else {
-            return
-        }
-
-        commitCurrentInterval()
-        activeDistanceSource = source
-        currentSourceBaseline = reading(for: source)
-
-        switch source {
-        case .gps:
-            gpsBaseline = currentSourceBaseline
-        case .pedometer:
-            pedometerBaseline = currentSourceBaseline
-        }
-    }
-
-    /// Finalizes exactly one source interval and adds its delta to committed distance.
-    private func commitCurrentInterval() {
-        guard let source = activeDistanceSource else {
-            return
-        }
-
-        let interval = DistanceInterval(
-            source: source,
-            baseline: currentSourceBaseline,
-            endReading: reading(for: source)
-        )
-
-        completedIntervals.append(interval)
-        committedDistance += interval.distance
-        activeDistanceSource = nil
-        currentSourceBaseline = 0
     }
 
     /// Establishes fresh pedometer baselines for a new active tracking interval.
@@ -596,16 +499,6 @@ final class OutdoorSessionService {
         lastTimeAccountingDate = nil
     }
 
-    /// Clears source history so a new session always begins at zero distance.
-    private func resetDistanceIntervals() {
-        completedIntervals = []
-        committedDistance = 0
-        activeDistanceSource = nil
-        currentSourceBaseline = 0
-        gpsBaseline = 0
-        pedometerBaseline = 0
-    }
-
     /// Clears reliability evidence before a new foreground tracking period.
     private func resetGPSReliability() {
         cancelReliabilityTimeout()
@@ -642,7 +535,6 @@ final class OutdoorSessionService {
         consecutiveGoodFixes = 0
         consecutiveBadFixes = Self.requiredConsecutiveBadFixes
         gpsReliability = .unreliable
-        evaluateDistanceSource()
     }
 
     /// Cancels the pending no-fix deadline when tracking pauses or stops.
@@ -651,30 +543,4 @@ final class OutdoorSessionService {
         reliabilityTimeoutTask = nil
     }
 
-    /// Returns the uncommitted delta from the current interval's single source.
-    private var currentIntervalDistance: Double {
-        guard let activeDistanceSource else {
-            return 0
-        }
-
-        return max(reading(for: activeDistanceSource) - currentSourceBaseline, 0)
-    }
-
-    /// Reports whether Core Motion can currently provide pedometer distance.
-    private var isPedometerReady: Bool {
-        motionService.isDistanceAvailable
-            && motionService.authorizationStatus == .authorized
-            && motionService.activityState == .active
-            && motionService.motionError == nil
-    }
-
-    /// Returns one sensor's cumulative reading without combining it with another source.
-    private func reading(for source: DistanceSource) -> Double {
-        switch source {
-        case .gps:
-            0
-        case .pedometer:
-            motionService.pedometerDistance
-        }
-    }
 }

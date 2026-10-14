@@ -20,7 +20,7 @@ struct SessionView: View {
                 SessionStatusBanner(
                     activityState: sessionService.walkingActivityState,
                     trackingState: sessionService.locationService.trackingState,
-                    motionAvailability: sessionService.motionFallbackAvailability,
+                    motionAvailability: sessionService.motionAvailability,
                     shouldShowInactivityActions: sessionService.shouldShowInactivityActions,
                     hasProlongedInactivity: sessionService.hasProlongedInactivity,
                     locationErrorMessage: sessionService.locationService.locationError?.localizedDescription,
@@ -40,7 +40,7 @@ struct SessionView: View {
                 SessionControls(
                     hasStartedSession: hasStartedSession,
                     state: sessionService.locationService.trackingState,
-                    distance: sessionService.estimatedDistance,
+                    estimatedDistance: sessionService.estimatedDistance,
                     onStart: sessionService.startSession,
                     onPause: sessionService.pauseSession,
                     onResume: sessionService.resumeSession,
@@ -140,7 +140,7 @@ private struct WalkingTimeCard: View {
 private struct SessionStatusBanner: View {
     let activityState: WalkingActivityState
     let trackingState: TrackingState
-    let motionAvailability: OutdoorSessionService.MotionFallbackAvailability
+    let motionAvailability: OutdoorSessionService.MotionAvailability
     let shouldShowInactivityActions: Bool
     let hasProlongedInactivity: Bool
     let locationErrorMessage: String?
@@ -357,7 +357,7 @@ private extension StatusMessage where Accessory == EmptyView {
 private struct SessionControls: View {
     let hasStartedSession: Bool
     let state: TrackingState
-    let distance: CLLocationDistance
+    let estimatedDistance: CLLocationDistance
     let onStart: () -> Void
     let onPause: () -> Void
     let onResume: () -> Void
@@ -372,16 +372,12 @@ private struct SessionControls: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                Text("\(distance.formatted(.number.precision(.fractionLength(0)))) m")
+                Text("\(estimatedDistance.formatted(.number.precision(.fractionLength(0)))) m")
                     .font(.headline)
                     .fontWeight(.semibold)
                     .monospacedDigit()
-
-                Text("Motion estimate")
-                    .font(.caption2)
-                    .fontWeight(.medium)
-                    .foregroundStyle(.secondary)
             }
+            .accessibilityElement(children: .combine)
 
             controls
         }
