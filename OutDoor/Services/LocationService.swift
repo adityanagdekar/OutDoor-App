@@ -22,16 +22,12 @@ final class LocationService: NSObject {
     private(set) var authorizationStatus: CLAuthorizationStatus
     private(set) var mapLocation: CLLocation?
     private(set) var latestLocation: CLLocation?
-    private(set) var routeSegments: [RouteSegment] = []
-    private(set) var gpsRouteDistance: CLLocationDistance = 0
     private(set) var horizontalAccuracy: CLLocationAccuracy?
     private(set) var locationError: LocationError?
 
     private let locationManager: CLLocationManager
     private var isSessionActive = false
     private var isRequestingMapLocation = false
-    private var isRouteRecordingEnabled = true
-    private var shouldReanchorAtNextReliableFix = false
     private var lastReliabilityFix: CLLocation?
     @ObservationIgnored var onUpdate: (() -> Void)?
     @ObservationIgnored var onGPSFixEvaluated: ((Bool, Date) -> Void)?
@@ -87,7 +83,7 @@ final class LocationService: NSObject {
         beginTrackingIfPossible()
     }
 
-    /// Pauses the active session and stops location updates without clearing its route.
+    /// Pauses the active session and stops foreground location updates.
     func pauseSession() {
         guard isSessionActive else {
             return
@@ -105,18 +101,6 @@ final class LocationService: NSObject {
         }
 
         beginTrackingIfPossible()
-    }
-
-    /// Suspends GPS route and distance recording while fixes continue for reliability checks.
-    func suspendRouteRecording() {
-        isRouteRecordingEnabled = false
-        shouldReanchorAtNextReliableFix = false
-    }
-
-    /// Resumes route recording by making the next reliable fix a zero-distance anchor.
-    func resumeRouteRecordingAtNextReliableFix() {
-        isRouteRecordingEnabled = true
-        shouldReanchorAtNextReliableFix = true
     }
 
     /// Retries location updates after a temporary availability failure.
@@ -196,7 +180,7 @@ final class LocationService: NSObject {
         }
     }
 
-    /// Validates incoming locations and records only accepted route points.
+    /// Validates incoming locations and retains only the latest reliable position.
     private func receive(_ locations: [CLLocation]) {
         defer { onUpdate?() }
         let now = Date()
@@ -220,36 +204,14 @@ final class LocationService: NSObject {
             )
             onGPSFixEvaluated?(isReliableFix, now)
 
-            if lastReliabilityFix == nil
-                || location.timestamp > lastReliabilityFix?.timestamp ?? .distantPast {
-                lastReliabilityFix = location
-            }
-
-            guard isRouteRecordingEnabled else {
+            guard isReliableFix else {
                 continue
             }
 
-            if shouldReanchorAtNextReliableFix, isReliableFix {
-                shouldReanchorAtNextReliableFix = false
-                beginRouteSegment(at: location)
-                continue
-            }
-
-            switch LocationValidator.decision(
-                for: location,
-                after: latestLocation,
-                now: now
-            ) {
-            case .origin, .reanchor:
-                beginRouteSegment(at: location)
-            case .segment(let distance):
-                gpsRouteDistance += distance
-                latestLocation = location
-                routeSegments[routeSegments.count - 1].coordinates.append(location.coordinate)
-                markLocationAvailable()
-            case .rejected:
-                continue
-            }
+            lastReliabilityFix = location
+            latestLocation = location
+            mapLocation = location
+            markLocationAvailable()
         }
     }
 
@@ -267,14 +229,6 @@ final class LocationService: NSObject {
 
         mapLocation = location
         isRequestingMapLocation = false
-    }
-
-    /// Records a route anchor without adding distance from an earlier segment.
-    private func beginRouteSegment(at location: CLLocation) {
-        mapLocation = location
-        latestLocation = location
-        routeSegments.append(RouteSegment(coordinates: [location.coordinate]))
-        markLocationAvailable()
     }
 
     /// Marks the service as actively tracking after accepting a location.
@@ -308,12 +262,10 @@ final class LocationService: NSObject {
         locationError = .updatesFailed(message)
     }
 
-    /// Clears all route, distance, accuracy, and error data for a new session.
+    /// Clears location, accuracy, and error data for a new session.
     private func resetSession() {
         latestLocation = nil
         lastReliabilityFix = nil
-        routeSegments = []
-        gpsRouteDistance = 0
         horizontalAccuracy = nil
         locationError = nil
     }
@@ -350,7 +302,7 @@ extension LocationService: CLLocationManagerDelegate {
         }
     }
 
-    /// Receives new GPS samples and forwards them for validation and route recording.
+    /// Receives new GPS samples and forwards them for current-position validation.
     nonisolated func locationManager(
         _ manager: CLLocationManager,
         didUpdateLocations locations: [CLLocation]

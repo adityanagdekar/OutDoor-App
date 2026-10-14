@@ -19,21 +19,20 @@ struct SessionView: View {
             VStack(spacing: 12) {
                 SessionStatusBanner(
                     activityState: sessionService.walkingActivityState,
-                    state: sessionService.locationService.trackingState,
-                    gpsReliability: sessionService.gpsReliability,
-                    activeDistanceSource: sessionService.activeDistanceSource,
-                    motionFallbackAvailability: sessionService.motionFallbackAvailability,
-                    horizontalAccuracy: sessionService.locationService.horizontalAccuracy,
-                    errorMessage: sessionService.locationService.locationError?.localizedDescription,
+                    trackingState: sessionService.locationService.trackingState,
+                    motionAvailability: sessionService.motionFallbackAvailability,
+                    shouldShowInactivityActions: sessionService.shouldShowInactivityActions,
+                    hasProlongedInactivity: sessionService.hasProlongedInactivity,
+                    locationErrorMessage: sessionService.locationService.locationError?.localizedDescription,
                     onAllowLocation: sessionService.requestLocationAuthorization,
                     onOpenSettings: openSettings,
-                    onRetry: sessionService.retryLocationUpdates
+                    onRetry: sessionService.retryLocationUpdates,
+                    onContinue: sessionService.continueAfterInactivityWarning,
+                    onEnd: endSession
                 )
 
                 WalkingTimeCard(
-                    verifiedWalkingTime: sessionService.verifiedWalkingTime,
-                    remainingTime: sessionService.remainingTime,
-                    goalDuration: sessionService.goalDuration
+                    verifiedWalkingTime: sessionService.verifiedWalkingTime
                 )
 
                 Spacer()
@@ -111,24 +110,16 @@ struct SessionView: View {
 
 private struct WalkingTimeCard: View {
     let verifiedWalkingTime: TimeInterval
-    let remainingTime: TimeInterval
-    let goalDuration: TimeInterval
 
     var body: some View {
         VStack(spacing: 4) {
-            Text("Verified Walking Time")
+            Text("Walking Time")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             Text(formattedTime(verifiedWalkingTime))
                 .font(.title)
                 .fontWeight(.semibold)
-                .monospacedDigit()
-
-            Text("Goal \(formattedTime(goalDuration)) · \(formattedTime(remainingTime)) remaining")
-                .font(.caption2)
-                .fontWeight(.medium)
-                .foregroundStyle(.secondary)
                 .monospacedDigit()
         }
         .frame(maxWidth: 240)
@@ -148,15 +139,16 @@ private struct WalkingTimeCard: View {
 
 private struct SessionStatusBanner: View {
     let activityState: WalkingActivityState
-    let state: TrackingState
-    let gpsReliability: GPSReliability
-    let activeDistanceSource: DistanceSource?
-    let motionFallbackAvailability: OutdoorSessionService.MotionFallbackAvailability
-    let horizontalAccuracy: CLLocationAccuracy?
-    let errorMessage: String?
+    let trackingState: TrackingState
+    let motionAvailability: OutdoorSessionService.MotionFallbackAvailability
+    let shouldShowInactivityActions: Bool
+    let hasProlongedInactivity: Bool
+    let locationErrorMessage: String?
     let onAllowLocation: () -> Void
     let onOpenSettings: () -> Void
     let onRetry: () -> Void
+    let onContinue: () -> Void
+    let onEnd: () -> Void
 
     @ViewBuilder
     var body: some View {
@@ -165,150 +157,145 @@ private struct SessionStatusBanner: View {
             StatusMessage(
                 icon: "figure.walk",
                 title: "Ready for Your Walk",
-                message: "Tap Start when you are ready to begin tracking your walk."
-            )
-        case .acquiringMovement:
-            acquiringStatusContent
-        case .walking:
-            StatusMessage(
-                icon: "figure.walk.motion",
-                title: "Walking Verified",
-                message: "Your verified walking time is increasing."
-            )
-        case .stationary:
-            StatusMessage(
-                icon: "figure.stand",
-                title: "No Movement Detected",
-                message: "Your session remains active, but stationary time does not earn usage time."
+                message: "Tap Start when you are ready. As a suggestion, walk for 30 minutes to earn 30 minutes of Instagram time."
             )
         case .paused:
             StatusMessage(
                 icon: "pause.circle",
                 title: "Session Paused",
-                message: "Time and sensor updates are paused until you resume."
+                message: "Walking time is not being earned until you resume."
             )
         case .completed:
             StatusMessage(
                 icon: "checkmark.circle",
                 title: "Session Completed",
-                message: "Your verified walking time and estimated distance are final."
+                message: "Your earned walking time is final."
             )
+        case .acquiringMovement, .walking, .stationary:
+            activeStatusContent
         }
     }
 
     @ViewBuilder
-    private var acquiringStatusContent: some View {
-        if isLimitedTracking {
-            StatusMessage(
-                icon: "exclamationmark.triangle",
-                title: "Limited Distance Tracking",
-                message: "GPS is not reliable and Motion & Fitness fallback is unavailable. Distance will remain unchanged until reliable GPS returns."
-            )
-        } else if isUsingPedometerFallback {
+    private var activeStatusContent: some View {
+        if motionAvailability == .unavailable {
             StatusMessage(
                 icon: "figure.walk.motion",
-                title: "Motion Fallback Active",
-                message: "GPS is currently unreliable. Motion & Fitness is estimating distance until GPS recovers."
+                title: "Motion Access Unavailable",
+                message: "Walking cannot be verified, so usage time is not currently being earned."
             )
-        } else if isAcquiringGPS {
-            StatusMessage(
-                icon: "location.magnifyingglass",
-                title: "Acquiring GPS",
-                message: accuracyMessage
-            ) {
-                ProgressView()
-            }
         } else {
-            switch state {
-        case .permissionNotRequested:
-            StatusMessage(
-                icon: "location",
-                title: "Location Access",
-                message: "Allow location access to map your walk and calculate distance."
-            ) {
-                Button("Allow Location", action: onAllowLocation)
-                    .buttonStyle(.borderedProminent)
+            switch trackingState {
+            case .permissionNotRequested:
+                StatusMessage(
+                    icon: "location.slash",
+                    title: "Location Access Unavailable",
+                    message: "Allow location access to show your position. \(locationEarningMessage)"
+                ) {
+                    Button("Allow Location", action: onAllowLocation)
+                        .buttonStyle(.borderedProminent)
+                }
+            case .permissionDenied:
+                StatusMessage(
+                    icon: "location.slash",
+                    title: "Location Access Unavailable",
+                    message: "Your map position is unavailable. \(locationEarningMessage)"
+                ) {
+                    Button("Open Settings", action: onOpenSettings)
+                        .buttonStyle(.borderedProminent)
+                }
+            case .permissionRestricted:
+                StatusMessage(
+                    icon: "location.slash",
+                    title: "Location Access Unavailable",
+                    message: "Location is restricted. \(locationEarningMessage)"
+                )
+            case .locationUnavailable:
+                StatusMessage(
+                    icon: "location.slash",
+                    title: "Location Access Unavailable",
+                    message: locationUnavailableMessage
+                ) {
+                    Button("Retry", action: onRetry)
+                        .buttonStyle(.borderedProminent)
+                }
+            case .waitingForAccurateFix, .tracking:
+                walkingStatusContent
+            case .paused, .completed:
+                walkingStatusContent
             }
-        case .permissionDenied:
+        }
+    }
+
+    @ViewBuilder
+    private var walkingStatusContent: some View {
+        switch activityState {
+        case .acquiringMovement:
             StatusMessage(
-                icon: "location.slash",
-                title: "Location Access Denied",
-                message: "Enable location access for OutDoor in Settings to track this session."
-            ) {
-                Button("Open Settings", action: onOpenSettings)
-                    .buttonStyle(.borderedProminent)
-            }
-        case .permissionRestricted:
-            StatusMessage(
-                icon: "location.slash",
-                title: "Location Restricted",
-                message: "Location access is restricted on this device and cannot be used for this session."
-            )
-        case .locationUnavailable:
-            StatusMessage(
-                icon: "exclamationmark.triangle",
-                title: "Location Unavailable",
-                message: errorMessage ?? "A location could not be determined. Check Location Services and try again."
-            ) {
-                Button("Retry", action: onRetry)
-                    .buttonStyle(.borderedProminent)
-            }
-        case .waitingForAccurateFix:
-            StatusMessage(
-                icon: "location.magnifyingglass",
-                title: "Acquiring GPS",
-                message: accuracyMessage
+                icon: "figure.walk",
+                title: "Detecting Movement",
+                message: "Start walking to earn usage time. No time is being earned yet."
             ) {
                 ProgressView()
             }
-        case .tracking:
+        case .walking:
             StatusMessage(
-                icon: "location.fill",
-                title: "GPS Tracking",
-                message: "Reliable GPS is updating your route and distance."
+                icon: "figure.walk.motion",
+                title: "Walking Time Active",
+                message: "Walking is verified and usage time is currently being earned."
             )
-        case .paused:
+        case .stationary where shouldShowInactivityActions:
             StatusMessage(
-                icon: "pause.circle",
-                title: "Session Paused",
-                message: "Your route is preserved while location updates are stopped."
-            )
-            case .completed:
-                StatusMessage(
-                    icon: "checkmark.circle",
-                    title: "Session Completed",
-                    message: "Location tracking has stopped and your final route is shown."
-                )
+                icon: "figure.stand",
+                title: "No Movement Detected",
+                message: inactivityMessage
+            ) {
+                VStack(spacing: 8) {
+                    Button("Continue Session", action: onContinue)
+                        .buttonStyle(.borderedProminent)
+
+                    Button("End Session", role: .destructive, action: onEnd)
+                        .buttonStyle(.bordered)
+                }
             }
+        case .stationary:
+            StatusMessage(
+                icon: "figure.stand",
+                title: "No Movement Detected",
+                message: "Your earned time is preserved, but no additional usage time is being earned."
+            )
+        case .ready, .paused, .completed:
+            EmptyView()
         }
     }
 
-    private var isLimitedTracking: Bool {
-        isLiveLocationState
-            && gpsReliability != .reliable
-            && motionFallbackAvailability == .unavailable
-    }
-
-    private var isUsingPedometerFallback: Bool {
-        isLiveLocationState && activeDistanceSource == .pedometer
-    }
-
-    private var isAcquiringGPS: Bool {
-        isLiveLocationState
-            && gpsReliability != .reliable
-            && activeDistanceSource != .pedometer
-    }
-
-    private var isLiveLocationState: Bool {
-        state == .waitingForAccurateFix || state == .tracking
-    }
-
-    private var accuracyMessage: String {
-        guard let horizontalAccuracy, horizontalAccuracy >= 0 else {
-            return "Waiting for an accurate GPS fix."
+    private var locationUnavailableMessage: String {
+        guard let locationErrorMessage else {
+            return "Your map position is unavailable. \(locationEarningMessage)"
         }
 
-        return "Current GPS accuracy is about \(horizontalAccuracy.formatted(.number.precision(.fractionLength(0)))) meters."
+        return "\(locationErrorMessage) \(locationEarningMessage)"
+    }
+
+    private var locationEarningMessage: String {
+        switch activityState {
+        case .walking:
+            return "Walking is verified and usage time is still being earned."
+        case .acquiringMovement:
+            return "Motion is detecting movement, but usage time is not being earned yet."
+        case .stationary:
+            return "Earned time is preserved, but no additional usage time is being earned."
+        case .ready, .paused, .completed:
+            return "Walking time is not currently being earned."
+        }
+    }
+
+    private var inactivityMessage: String {
+        if hasProlongedInactivity {
+            return "You have been inactive for an extended period. Earned time is preserved; continue waiting or end the session."
+        }
+
+        return "You have been stationary for several minutes. Earned time is preserved; continue waiting or end the session."
     }
 }
 

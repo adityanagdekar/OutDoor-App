@@ -57,8 +57,14 @@ final class OutdoorSessionService {
     /// Maximum age of a pedometer sample used as live movement evidence.
     static let maximumMotionUpdateAge: TimeInterval = 5
 
-    /// Time without fresh walking evidence before the session becomes stationary.
-    static let movementEvidenceTimeout: TimeInterval = 8
+    /// Brief movement gaps that continue counting as walking, such as traffic lights.
+    static let movementGracePeriod: TimeInterval = 75
+
+    /// Sustained inactivity duration before offering Continue or End actions.
+    static let stationaryWarningThreshold: TimeInterval = 3 * 60
+
+    /// Longer inactivity duration used to present a stronger warning.
+    static let prolongedInactivityThreshold: TimeInterval = 30 * 60
 
     /// Smallest forward pedometer distance change treated as movement.
     static let minimumMovementDistance: Double = 0.5
@@ -78,6 +84,8 @@ final class OutdoorSessionService {
     private(set) var completedIntervals: [DistanceInterval] = []
     private(set) var gpsReliability: GPSReliability = .acquiring
     private(set) var walkingActivityState: WalkingActivityState = .ready
+    private(set) var shouldShowInactivityActions = false
+    private(set) var hasProlongedInactivity = false
     private(set) var elapsedSessionTime: TimeInterval = 0
     private(set) var verifiedWalkingTime: TimeInterval = 0
     private(set) var stationaryTime: TimeInterval = 0
@@ -93,6 +101,8 @@ final class OutdoorSessionService {
     @ObservationIgnored private var reliabilityTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var timeAccountingTask: Task<Void, Never>?
     @ObservationIgnored private var movementTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private var stationaryWarningTask: Task<Void, Never>?
+    @ObservationIgnored private var prolongedInactivityTask: Task<Void, Never>?
 
     /// Combines completed intervals with only the current interval's sensor delta.
     var displayedDistance: Double {
@@ -173,7 +183,6 @@ final class OutdoorSessionService {
         beginTimeAccounting(at: startDate)
         motionService.startUpdates(from: startDate)
         resetMovementDetection(at: startDate)
-        locationService.suspendRouteRecording()
         locationService.startSession()
         evaluateDistanceSource()
     }
@@ -212,7 +221,6 @@ final class OutdoorSessionService {
         motionService.resumeUpdates(from: resumeDate)
         resetMovementDetection(at: resumeDate)
         pedometerBaseline = motionService.pedometerDistance
-        locationService.suspendRouteRecording()
         locationService.resumeSession()
         evaluateDistanceSource()
     }
@@ -235,6 +243,16 @@ final class OutdoorSessionService {
         motionService.stopUpdates()
         sessionState = .completed
         walkingActivityState = .completed
+    }
+
+    /// Keeps an inactive session open without awarding time until walking resumes.
+    func continueAfterInactivityWarning() {
+        guard sessionState == .active,
+              walkingActivityState == .stationary else {
+            return
+        }
+
+        shouldShowInactivityActions = false
     }
 
     /// Retries GPS updates while leaving pedometer observation and interval totals intact.
@@ -349,10 +367,8 @@ final class OutdoorSessionService {
         switch source {
         case .gps:
             gpsBaseline = currentSourceBaseline
-            locationService.resumeRouteRecordingAtNextReliableFix()
         case .pedometer:
             pedometerBaseline = currentSourceBaseline
-            locationService.suspendRouteRecording()
         }
     }
 
@@ -380,6 +396,8 @@ final class OutdoorSessionService {
         lastObservedStepCount = motionService.stepCount
         lastObservedPedometerDistance = motionService.pedometerDistance
         lastMovementEvidenceDate = date
+        shouldShowInactivityActions = false
+        hasProlongedInactivity = false
         scheduleMovementTimeout(after: date)
     }
 
@@ -407,16 +425,32 @@ final class OutdoorSessionService {
 
         let evidenceDate = motionService.lastUpdateDate ?? now
         lastMovementEvidenceDate = evidenceDate
+        shouldShowInactivityActions = false
+        hasProlongedInactivity = false
         setWalkingVerification(true, at: now)
         scheduleMovementTimeout(after: evidenceDate)
     }
 
-    /// Restarts the deadline used to identify when verified movement has stopped.
+    /// Restarts the configurable grace, warning, and prolonged-inactivity deadlines.
     private func scheduleMovementTimeout(after evidenceDate: Date) {
         cancelMovementTimeout()
 
+        let evidenceAge = max(Date().timeIntervalSince(evidenceDate), 0)
+        let remainingGracePeriod = max(
+            Self.movementGracePeriod - evidenceAge,
+            0
+        )
+        let remainingWarningPeriod = max(
+            Self.stationaryWarningThreshold - evidenceAge,
+            0
+        )
+        let remainingProlongedPeriod = max(
+            Self.prolongedInactivityThreshold - evidenceAge,
+            0
+        )
+
         movementTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.movementEvidenceTimeout))
+            try? await Task.sleep(for: .seconds(remainingGracePeriod))
 
             guard !Task.isCancelled else {
                 return
@@ -424,9 +458,29 @@ final class OutdoorSessionService {
 
             self?.handleMovementTimeout(expectedEvidenceDate: evidenceDate)
         }
+
+        stationaryWarningTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(remainingWarningPeriod))
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            self?.handleStationaryWarning(expectedEvidenceDate: evidenceDate)
+        }
+
+        prolongedInactivityTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(remainingProlongedPeriod))
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            self?.handleProlongedInactivity(expectedEvidenceDate: evidenceDate)
+        }
     }
 
-    /// Changes the active session to stationary when no newer movement evidence arrived.
+    /// Stops earning walking time after the movement grace period expires.
     private func handleMovementTimeout(expectedEvidenceDate: Date) {
         guard sessionState == .active,
               lastMovementEvidenceDate == expectedEvidenceDate else {
@@ -436,10 +490,37 @@ final class OutdoorSessionService {
         setWalkingVerification(false)
     }
 
-    /// Cancels movement classification work while the session is not active.
+    /// Offers Continue and End after sustained inactivity.
+    private func handleStationaryWarning(expectedEvidenceDate: Date) {
+        guard sessionState == .active,
+              walkingActivityState == .stationary,
+              lastMovementEvidenceDate == expectedEvidenceDate else {
+            return
+        }
+
+        shouldShowInactivityActions = true
+    }
+
+    /// Strengthens the warning after the longer configurable inactivity threshold.
+    private func handleProlongedInactivity(expectedEvidenceDate: Date) {
+        guard sessionState == .active,
+              walkingActivityState == .stationary,
+              lastMovementEvidenceDate == expectedEvidenceDate else {
+            return
+        }
+
+        hasProlongedInactivity = true
+        shouldShowInactivityActions = true
+    }
+
+    /// Cancels all pending inactivity transitions while the session is not active.
     private func cancelMovementTimeout() {
         movementTimeoutTask?.cancel()
         movementTimeoutTask = nil
+        stationaryWarningTask?.cancel()
+        stationaryWarningTask = nil
+        prolongedInactivityTask?.cancel()
+        prolongedInactivityTask = nil
     }
 
     /// Resets all time measurements before a new session begins.
@@ -448,6 +529,8 @@ final class OutdoorSessionService {
         elapsedSessionTime = 0
         verifiedWalkingTime = 0
         stationaryTime = 0
+        shouldShowInactivityActions = false
+        hasProlongedInactivity = false
         walkingActivityState = .ready
     }
 
@@ -589,7 +672,7 @@ final class OutdoorSessionService {
     private func reading(for source: DistanceSource) -> Double {
         switch source {
         case .gps:
-            locationService.gpsRouteDistance
+            0
         case .pedometer:
             motionService.pedometerDistance
         }

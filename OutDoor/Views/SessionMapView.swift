@@ -19,13 +19,6 @@ struct SessionMapView: View {
     var body: some View {
         Map(position: $position) {
             UserAnnotation()
-
-            ForEach(locationService.routeSegments) { segment in
-                if segment.coordinates.count > 1 {
-                    MapPolyline(coordinates: segment.coordinates)
-                        .stroke(.blue, lineWidth: 5)
-                }
-            }
         }
         .mapControls {
             MapUserLocationButton()
@@ -38,22 +31,9 @@ struct SessionMapView: View {
         .onChange(of: locationService.mapLocation?.timestamp) {
             zoomToLatestLocation()
         }
-        .onChange(of: acceptedLocationCount) { oldCount, newCount in
-            guard oldCount == 0, newCount > 0 else {
-                return
-            }
-
-            zoomToLatestLocation()
-        }
     }
 
-    private var acceptedLocationCount: Int {
-        locationService.routeSegments.reduce(0) { count, segment in
-            count + segment.coordinates.count
-        }
-    }
-
-    /// Centers the map closely on the most recent accepted GPS point.
+    /// Centers the map closely on the most recent reliable GPS position.
     private func zoomToLatestLocation() {
         guard let coordinate = (
             locationService.latestLocation ?? locationService.mapLocation
