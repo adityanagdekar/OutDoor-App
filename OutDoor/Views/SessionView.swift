@@ -373,7 +373,7 @@ private struct SessionControls: View {
                     .foregroundStyle(.secondary)
 
                 Text("\(estimatedDistance.formatted(.number.precision(.fractionLength(0)))) m")
-                    .font(.headline)
+                    .font(.title2)
                     .fontWeight(.semibold)
                     .monospacedDigit()
             }
