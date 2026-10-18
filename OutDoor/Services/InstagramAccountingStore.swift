@@ -66,6 +66,71 @@ actor InstagramAccountingStore {
         try data.write(to: fileURL, options: .atomic)
     }
 
+    /// Builds today's read-only insights using the user's current calendar day.
+    func insights(
+        at date: Date = Date(),
+        calendar: Calendar = .autoupdatingCurrent
+    ) throws -> InstagramInsightsSnapshot {
+        let state = try loadState()
+        guard let dayInterval = calendar.dateInterval(of: .day, for: date) else {
+            return .empty
+        }
+
+        var usageToday: TimeInterval = 0
+        var excessToday: TimeInterval = 0
+
+        for session in state.completedSessions where session.status == .finalized {
+            let endTimestamp = session.endTimestamp ?? session.startTimestamp
+            usageToday += overlapDuration(
+                from: session.startTimestamp,
+                to: endTimestamp,
+                with: dayInterval
+            )
+
+            let excessStart = session.startTimestamp.addingTimeInterval(
+                max(0, session.quotaAtStartSeconds)
+            )
+            excessToday += overlapDuration(
+                from: excessStart,
+                to: endTimestamp,
+                with: dayInterval
+            )
+        }
+
+        var effectiveAvailableCredit = state.availableCreditSeconds.isFinite
+            ? max(0, state.availableCreditSeconds)
+            : 0
+
+        if let activeSession = state.activeSession {
+            usageToday += overlapDuration(
+                from: activeSession.startTimestamp,
+                to: date,
+                with: dayInterval
+            )
+
+            let quota = max(0, activeSession.quotaAtStartSeconds)
+            let elapsed = max(0, date.timeIntervalSince(activeSession.startTimestamp))
+            let provisionallyConsumed = min(elapsed, quota)
+            effectiveAvailableCredit = max(
+                0,
+                effectiveAvailableCredit - provisionallyConsumed
+            )
+
+            let excessStart = activeSession.startTimestamp.addingTimeInterval(quota)
+            excessToday += overlapDuration(
+                from: excessStart,
+                to: date,
+                with: dayInterval
+            )
+        }
+
+        return InstagramInsightsSnapshot(
+            availableCreditSeconds: effectiveAvailableCredit,
+            estimatedUsageTodaySeconds: usageToday,
+            estimatedExcessTodaySeconds: excessToday
+        )
+    }
+
     /// Starts one session, or reuses the existing session without resetting its allowance.
     func startSession(at startTimestamp: Date = Date()) throws -> InstagramSessionStartResult {
         var state = try loadState()
@@ -179,6 +244,21 @@ actor InstagramAccountingStore {
         }
 
         try fileManager.removeItem(at: fileURL)
+    }
+
+    /// Returns the portion of a session interval that falls within a calendar day.
+    private func overlapDuration(
+        from start: Date,
+        to end: Date,
+        with dayInterval: DateInterval
+    ) -> TimeInterval {
+        guard end > start else {
+            return 0
+        }
+
+        let overlapStart = max(start, dayInterval.start)
+        let overlapEnd = min(end, dayInterval.end)
+        return max(0, overlapEnd.timeIntervalSince(overlapStart))
     }
 
     /// Resolves the private Application Support file used by both the UI and App Intents.

@@ -8,7 +8,8 @@ struct WelcomeView: View {
 #endif
 
     var body: some View {
-        VStack(spacing: 24) {
+        ScrollView {
+            VStack(spacing: 24) {
             Spacer()
 
             Image(systemName: "figure.walk")
@@ -32,6 +33,8 @@ struct WelcomeView: View {
                 authorizationState: $notificationAuthorizationState
             )
 
+            InstagramInsightsCard()
+
             Spacer()
 
 #if DEBUG
@@ -43,9 +46,10 @@ struct WelcomeView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .padding(.bottom, 32)
+                .padding(.bottom, 32)
+            }
+            .padding()
         }
-        .padding()
     }
 }
 

@@ -63,6 +63,19 @@ nonisolated struct WalkingCreditEntry: Codable, Identifiable, Sendable {
     }
 }
 
+/// A read-only summary prepared for the Instagram insights UI.
+nonisolated struct InstagramInsightsSnapshot: Equatable, Sendable {
+    static let empty = InstagramInsightsSnapshot(
+        availableCreditSeconds: 0,
+        estimatedUsageTodaySeconds: 0,
+        estimatedExcessTodaySeconds: 0
+    )
+
+    let availableCreditSeconds: TimeInterval
+    let estimatedUsageTodaySeconds: TimeInterval
+    let estimatedExcessTodaySeconds: TimeInterval
+}
+
 /// The result of attempting to begin or reuse an Instagram session.
 nonisolated struct InstagramSessionStartResult: Sendable {
     let isAllowed: Bool
