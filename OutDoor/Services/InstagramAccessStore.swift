@@ -2,7 +2,7 @@ import Foundation
 
 /// Persists the wall-clock Instagram access window used by both the app and App Intent.
 enum InstagramAccessStore {
-    static let expirationKey = "instagramAccessExpiresAt"
+    nonisolated static let expirationKey = "instagramAccessExpiresAt"
 
     private static var defaults: UserDefaults {
         .standard

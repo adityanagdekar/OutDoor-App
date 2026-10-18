@@ -63,6 +63,14 @@ nonisolated struct WalkingCreditEntry: Codable, Identifiable, Sendable {
     }
 }
 
+/// The result of attempting to begin or reuse an Instagram session.
+nonisolated struct InstagramSessionStartResult: Sendable {
+    let isAllowed: Bool
+    let session: InstagramSession?
+    let didCreateSession: Bool
+    let remainingSeconds: TimeInterval
+}
+
 /// The complete locally persisted Instagram accounting document.
 nonisolated struct InstagramAccountingState: Codable, Sendable {
     static let currentSchemaVersion = 1
@@ -72,18 +80,95 @@ nonisolated struct InstagramAccountingState: Codable, Sendable {
     var completedSessions: [InstagramSession]
     var verifiedWalkingEntries: [WalkingCreditEntry]
     var schemaVersion: Int
+    var hasCompletedLegacyExpirationMigration: Bool
+
+    /// All persisted verified walking time, independent of Instagram usage.
+    var totalVerifiedWalkingSeconds: TimeInterval {
+        verifiedWalkingEntries.reduce(0) { total, entry in
+            guard entry.durationSeconds.isFinite else {
+                return total
+            }
+
+            return total + max(0, entry.durationSeconds)
+        }
+    }
+
+    /// All finalized Instagram time estimated from Shortcuts events.
+    var totalEstimatedInstagramUsageSeconds: TimeInterval {
+        completedSessions.reduce(0) { total, session in
+            guard session.status == .finalized,
+                  let elapsed = session.elapsedSeconds,
+                  elapsed.isFinite else {
+                return total
+            }
+
+            return total + max(0, elapsed)
+        }
+    }
+
+    /// Historical usage beyond allowance; this never reduces available credit.
+    var totalExcessUsageSeconds: TimeInterval {
+        completedSessions.reduce(0) { total, session in
+            guard session.status == .finalized,
+                  let excess = session.excessSeconds,
+                  excess.isFinite else {
+                return total
+            }
+
+            return total + max(0, excess)
+        }
+    }
 
     init(
         availableCreditSeconds: TimeInterval = 0,
         activeSession: InstagramSession? = nil,
         completedSessions: [InstagramSession] = [],
         verifiedWalkingEntries: [WalkingCreditEntry] = [],
-        schemaVersion: Int = currentSchemaVersion
+        schemaVersion: Int = currentSchemaVersion,
+        hasCompletedLegacyExpirationMigration: Bool = false
     ) {
         self.availableCreditSeconds = availableCreditSeconds
         self.activeSession = activeSession
         self.completedSessions = completedSessions
         self.verifiedWalkingEntries = verifiedWalkingEntries
         self.schemaVersion = schemaVersion
+        self.hasCompletedLegacyExpirationMigration = hasCompletedLegacyExpirationMigration
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case availableCreditSeconds
+        case activeSession
+        case completedSessions
+        case verifiedWalkingEntries
+        case schemaVersion
+        case hasCompletedLegacyExpirationMigration
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        availableCreditSeconds = try container.decodeIfPresent(
+            TimeInterval.self,
+            forKey: .availableCreditSeconds
+        ) ?? 0
+        activeSession = try container.decodeIfPresent(
+            InstagramSession.self,
+            forKey: .activeSession
+        )
+        completedSessions = try container.decodeIfPresent(
+            [InstagramSession].self,
+            forKey: .completedSessions
+        ) ?? []
+        verifiedWalkingEntries = try container.decodeIfPresent(
+            [WalkingCreditEntry].self,
+            forKey: .verifiedWalkingEntries
+        ) ?? []
+        schemaVersion = try container.decodeIfPresent(
+            Int.self,
+            forKey: .schemaVersion
+        ) ?? Self.currentSchemaVersion
+        hasCompletedLegacyExpirationMigration = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .hasCompletedLegacyExpirationMigration
+        ) ?? false
     }
 }

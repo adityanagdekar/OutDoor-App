@@ -8,37 +8,53 @@ actor InstagramAccountingStore {
 
     enum StoreError: LocalizedError {
         case applicationSupportDirectoryUnavailable
+        case invalidCreditDuration
 
         var errorDescription: String? {
             switch self {
             case .applicationSupportDirectoryUnavailable:
                 return "OutDoor could not access its private Application Support directory."
+            case .invalidCreditDuration:
+                return "Walking credit must be a positive, finite duration."
             }
         }
     }
 
     private let fileManager: FileManager
+    private let userDefaults: UserDefaults
     private let customFileURL: URL?
 
     /// Uses a custom URL for tests, or OutDoor's Application Support directory in production.
     init(
         fileManager: FileManager = .default,
+        userDefaults: UserDefaults = .standard,
         fileURL: URL? = nil
     ) {
         self.fileManager = fileManager
+        self.userDefaults = userDefaults
         self.customFileURL = fileURL
     }
 
     /// Loads the persisted state, or returns a new empty state when no file exists yet.
     func loadState() throws -> InstagramAccountingState {
         let fileURL = try accountingFileURL()
+        var state: InstagramAccountingState
 
-        guard fileManager.fileExists(atPath: fileURL.path) else {
-            return InstagramAccountingState()
+        if fileManager.fileExists(atPath: fileURL.path) {
+            let data = try Data(contentsOf: fileURL)
+            state = try decoder.decode(InstagramAccountingState.self, from: data)
+        } else {
+            state = InstagramAccountingState()
         }
 
-        let data = try Data(contentsOf: fileURL)
-        return try decoder.decode(InstagramAccountingState.self, from: data)
+        if !state.hasCompletedLegacyExpirationMigration {
+            userDefaults.removeObject(forKey: InstagramAccessStore.expirationKey)
+            state.availableCreditSeconds = 0
+            state.hasCompletedLegacyExpirationMigration = true
+            try saveState(state)
+        }
+
+        return state
     }
 
     /// Atomically replaces the persisted accounting document with the supplied state.
@@ -48,6 +64,79 @@ actor InstagramAccountingStore {
 
         let data = try encoder.encode(state)
         try data.write(to: fileURL, options: .atomic)
+    }
+
+    /// Starts one session, or reuses the existing session without resetting its allowance.
+    func startSession(at startTimestamp: Date = Date()) throws -> InstagramSessionStartResult {
+        var state = try loadState()
+
+        if let activeSession = state.activeSession {
+            let elapsed = max(
+                0,
+                startTimestamp.timeIntervalSince(activeSession.startTimestamp)
+            )
+            let remaining = max(
+                0,
+                activeSession.quotaAtStartSeconds - elapsed
+            )
+
+            return InstagramSessionStartResult(
+                isAllowed: remaining > 0,
+                session: activeSession,
+                didCreateSession: false,
+                remainingSeconds: remaining
+            )
+        }
+
+        let availableCredit = state.availableCreditSeconds.isFinite
+            ? max(0, state.availableCreditSeconds)
+            : 0
+
+        guard availableCredit > 0 else {
+            return InstagramSessionStartResult(
+                isAllowed: false,
+                session: nil,
+                didCreateSession: false,
+                remainingSeconds: 0
+            )
+        }
+
+        let session = InstagramSession(
+            startTimestamp: startTimestamp,
+            quotaAtStartSeconds: availableCredit
+        )
+        state.activeSession = session
+        try saveState(state)
+
+        return InstagramSessionStartResult(
+            isAllowed: true,
+            session: session,
+            didCreateSession: true,
+            remainingSeconds: availableCredit
+        )
+    }
+
+    /// Adds verified walking credit without changing an active session's original quota.
+    @discardableResult
+    func grantVerifiedWalkingCredit(
+        seconds: TimeInterval,
+        earnedAt: Date = Date()
+    ) throws -> WalkingCreditEntry {
+        guard seconds.isFinite, seconds > 0 else {
+            throw StoreError.invalidCreditDuration
+        }
+
+        var state = try loadState()
+        let entry = WalkingCreditEntry(
+            earnedAt: earnedAt,
+            durationSeconds: seconds
+        )
+
+        state.availableCreditSeconds = max(0, state.availableCreditSeconds) + seconds
+        state.verifiedWalkingEntries.append(entry)
+
+        try saveState(state)
+        return entry
     }
 
     /// Finalizes the active Instagram session exactly once and deducts only covered usage.
