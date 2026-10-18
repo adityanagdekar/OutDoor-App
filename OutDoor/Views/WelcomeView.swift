@@ -2,10 +2,7 @@ import SwiftUI
 
 struct WelcomeView: View {
     @State private var notificationAuthorizationState = AllowanceReminderService.AuthorizationState.unknown
-
-#if DEBUG
-    @State private var debugAccessExpiration = InstagramAccessStore.expirationDate
-#endif
+    @State private var insightsRefreshID = UUID()
 
     var body: some View {
         ScrollView {
@@ -34,11 +31,14 @@ struct WelcomeView: View {
             )
 
             InstagramInsightsCard()
+                .id(insightsRefreshID)
 
             Spacer()
 
 #if DEBUG
-            InstagramAccessDebugControls(expirationDate: $debugAccessExpiration)
+            InstagramAccountingDebugControls {
+                insightsRefreshID = UUID()
+            }
 #endif
 
             NavigationLink("START") {
@@ -104,45 +104,50 @@ private struct NotificationPermissionCard: View {
 
     private func requestAuthorization() {
         Task {
+            OutDoorLog.debug("NOTIFICATION_PERMISSION_BUTTON_TAPPED")
             do {
                 errorMessage = nil
                 authorizationState = try await AllowanceReminderService.shared.requestAuthorization()
+                OutDoorLog.debug("NOTIFICATION_PERMISSION_UI_UPDATED state=\(String(describing: authorizationState))")
             } catch {
                 errorMessage = error.localizedDescription
                 authorizationState = await AllowanceReminderService.shared.authorizationState()
+                OutDoorLog.error("DebugControls", "NOTIFICATION_PERMISSION_UI_FAILED error=\(error.localizedDescription)")
             }
         }
     }
 }
 
 #if DEBUG
-private struct InstagramAccessDebugControls: View {
-    @Binding var expirationDate: Date?
+private struct InstagramAccountingDebugControls: View {
+    let onAccountingChanged: () -> Void
+    @State private var statusMessage = "TEST credit is separate from verified walking."
+    @State private var isWorking = false
 
     var body: some View {
         VStack(spacing: 10) {
-            Label("DEBUG – Instagram Access Test", systemImage: "ladybug.fill")
+            Label("DEBUG – Instagram Accounting Test", systemImage: "ladybug.fill")
                 .font(.caption)
                 .fontWeight(.semibold)
                 .foregroundStyle(.orange)
 
-            Text(statusText)
+            Text(statusMessage)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
             HStack {
-                Button("Grant 1 Minute TEST Access") {
-                    expirationDate = InstagramAccessStore.grantAccess(for: 60)
+                Button("Grant 1 Minute TEST Credit") {
+                    grantTestCredit()
                 }
                 .buttonStyle(.bordered)
 
-                Button("Clear TEST Access", role: .destructive) {
-                    InstagramAccessStore.clearAccess()
-                    expirationDate = nil
+                Button("Reset TEST Accounting", role: .destructive) {
+                    resetTestAccounting()
                 }
                 .buttonStyle(.bordered)
             }
             .font(.caption)
+            .disabled(isWorking)
         }
         .frame(maxWidth: .infinity)
         .padding()
@@ -150,16 +155,44 @@ private struct InstagramAccessDebugControls: View {
         .accessibilityElement(children: .contain)
     }
 
-    private var statusText: String {
-        guard let expirationDate else {
-            return "No test access is stored."
-        }
+    private func grantTestCredit() {
+        Task {
+            OutDoorLog.debug("GRANT_TEST_CREDIT_BUTTON_TAPPED seconds=60")
+            isWorking = true
+            defer { isWorking = false }
 
-        if expirationDate > Date() {
-            return "Test access expires at \(expirationDate.formatted(date: .omitted, time: .standard))."
+            do {
+                let availableSeconds = try await InstagramAccountingStore.shared.grantTestCredit(
+                    seconds: 60
+                )
+                let availableMinutes = Int((availableSeconds / 60).rounded())
+                statusMessage = "Granted 1 minute of TEST credit. Available quota: \(availableMinutes) min."
+                OutDoorLog.debug("GRANT_TEST_CREDIT_COMPLETED availableSeconds=\(availableSeconds)")
+                onAccountingChanged()
+            } catch {
+                statusMessage = error.localizedDescription
+                OutDoorLog.error("DebugControls", "GRANT_TEST_CREDIT_FAILED error=\(error.localizedDescription)")
+            }
         }
+    }
 
-        return "The stored test access has expired."
+    private func resetTestAccounting() {
+        Task {
+            OutDoorLog.debug("RESET_TEST_ACCOUNTING_BUTTON_TAPPED")
+            isWorking = true
+            defer { isWorking = false }
+
+            do {
+                await AllowanceReminderService.shared.cancelAllAllowanceReminders()
+                try await InstagramAccountingStore.shared.resetTestAccounting()
+                statusMessage = "TEST accounting, sessions, reminders, and legacy access were reset."
+                OutDoorLog.debug("RESET_TEST_ACCOUNTING_COMPLETED")
+                onAccountingChanged()
+            } catch {
+                statusMessage = error.localizedDescription
+                OutDoorLog.error("DebugControls", "RESET_TEST_ACCOUNTING_FAILED error=\(error.localizedDescription)")
+            }
+        }
     }
 }
 #endif

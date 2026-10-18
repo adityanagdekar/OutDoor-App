@@ -41,10 +41,19 @@ actor InstagramAccountingStore {
         var state: InstagramAccountingState
 
         if fileManager.fileExists(atPath: fileURL.path) {
-            let data = try Data(contentsOf: fileURL)
-            state = try decoder.decode(InstagramAccountingState.self, from: data)
+            do {
+                let data = try Data(contentsOf: fileURL)
+                state = try decoder.decode(InstagramAccountingState.self, from: data)
+                OutDoorLog.accounting(
+                    "STATE_LOADED balanceSeconds=\(state.availableCreditSeconds) activeSessionID=\(state.activeSession?.id.uuidString ?? "none") completedCount=\(state.completedSessions.count)"
+                )
+            } catch {
+                OutDoorLog.error("InstagramAccounting", "STATE_LOAD_FAILED error=\(error.localizedDescription)")
+                throw error
+            }
         } else {
             state = InstagramAccountingState()
+            OutDoorLog.accounting("STATE_FILE_MISSING createdInMemoryEmptyState")
         }
 
         if !state.hasCompletedLegacyExpirationMigration {
@@ -52,6 +61,7 @@ actor InstagramAccountingStore {
             state.availableCreditSeconds = 0
             state.hasCompletedLegacyExpirationMigration = true
             try saveState(state)
+            OutDoorLog.accounting("LEGACY_MIGRATION_COMPLETED balanceSeconds=0")
         }
 
         return state
@@ -64,6 +74,9 @@ actor InstagramAccountingStore {
 
         let data = try encoder.encode(state)
         try data.write(to: fileURL, options: .atomic)
+        OutDoorLog.accounting(
+            "STATE_SAVED balanceSeconds=\(state.availableCreditSeconds) activeSessionID=\(state.activeSession?.id.uuidString ?? "none") completedCount=\(state.completedSessions.count)"
+        )
     }
 
     /// Builds today's read-only insights using the user's current calendar day.
@@ -124,11 +137,15 @@ actor InstagramAccountingStore {
             )
         }
 
-        return InstagramInsightsSnapshot(
+        let snapshot = InstagramInsightsSnapshot(
             availableCreditSeconds: effectiveAvailableCredit,
             estimatedUsageTodaySeconds: usageToday,
             estimatedExcessTodaySeconds: excessToday
         )
+        OutDoorLog.insights(
+            "INSIGHTS_CALCULATED availableSeconds=\(snapshot.availableCreditSeconds) usageTodaySeconds=\(snapshot.estimatedUsageTodaySeconds) excessTodaySeconds=\(snapshot.estimatedExcessTodaySeconds) activeSessionID=\(state.activeSession?.id.uuidString ?? "none")"
+        )
+        return snapshot
     }
 
     /// Starts one session, or reuses the existing session without resetting its allowance.
@@ -145,8 +162,12 @@ actor InstagramAccountingStore {
                 activeSession.quotaAtStartSeconds - elapsed
             )
 
+            let isAllowed = remaining > 0
+            OutDoorLog.accounting(
+                "SESSION_REUSED id=\(activeSession.id.uuidString) elapsedSeconds=\(elapsed) remainingSeconds=\(remaining) allowed=\(isAllowed)"
+            )
             return InstagramSessionStartResult(
-                isAllowed: remaining > 0,
+                isAllowed: isAllowed,
                 session: activeSession,
                 didCreateSession: false,
                 remainingSeconds: remaining
@@ -158,6 +179,7 @@ actor InstagramAccountingStore {
             : 0
 
         guard availableCredit > 0 else {
+            OutDoorLog.accounting("SESSION_START_DENIED availableSeconds=0")
             return InstagramSessionStartResult(
                 isAllowed: false,
                 session: nil,
@@ -172,6 +194,12 @@ actor InstagramAccountingStore {
         )
         state.activeSession = session
         try saveState(state)
+        OutDoorLog.accounting(
+            "SESSION_CREATED id=\(session.id.uuidString) quotaSeconds=\(availableCredit) start=\(startTimestamp.ISO8601Format())"
+        )
+        OutDoorLog.accounting(
+            "SESSION_GRANTED id=\(session.id.uuidString) grantedSeconds=\(availableCredit)"
+        )
 
         return InstagramSessionStartResult(
             isAllowed: true,
@@ -179,6 +207,33 @@ actor InstagramAccountingStore {
             didCreateSession: true,
             remainingSeconds: availableCredit
         )
+    }
+
+    /// Adds temporary DEBUG credit without recording it as verified walking.
+    @discardableResult
+    func grantTestCredit(seconds: TimeInterval) throws -> TimeInterval {
+        guard seconds.isFinite, seconds > 0 else {
+            throw StoreError.invalidCreditDuration
+        }
+
+        var state = try loadState()
+        state.availableCreditSeconds = max(0, state.availableCreditSeconds) + seconds
+        try saveState(state)
+        OutDoorLog.accounting(
+            "TEST_CREDIT_GRANTED grantedSeconds=\(seconds) availableSeconds=\(state.availableCreditSeconds)"
+        )
+        return state.availableCreditSeconds
+    }
+
+    /// Clears all local accounting and legacy expiration data for DEBUG verification.
+    func resetTestAccounting() throws {
+        userDefaults.removeObject(forKey: InstagramAccessStore.expirationKey)
+        let emptyState = InstagramAccountingState(
+            hasCompletedLegacyExpirationMigration: true
+        )
+        try saveState(emptyState)
+        OutDoorLog.accounting("TEST_ACCOUNTING_RESET balanceSeconds=0 activeSessionID=none completedCount=0")
+        OutDoorLog.accounting("SESSION_RESET balanceSeconds=0 activeSessionID=none completedCount=0")
     }
 
     /// Adds verified walking credit without changing an active session's original quota.
@@ -201,6 +256,9 @@ actor InstagramAccountingStore {
         state.verifiedWalkingEntries.append(entry)
 
         try saveState(state)
+        OutDoorLog.accounting(
+            "WALKING_CREDIT_GRANTED entryID=\(entry.id.uuidString) seconds=\(seconds) availableSeconds=\(state.availableCreditSeconds)"
+        )
         return entry
     }
 
@@ -210,6 +268,7 @@ actor InstagramAccountingStore {
         var state = try loadState()
 
         guard var session = state.activeSession else {
+            OutDoorLog.accounting("SESSION_END_NO_ACTIVE_SESSION")
             return nil
         }
 
@@ -232,6 +291,12 @@ actor InstagramAccountingStore {
         state.completedSessions.append(session)
 
         try saveState(state)
+        OutDoorLog.accounting(
+            "SESSION_FINALIZED id=\(session.id.uuidString) elapsedSeconds=\(elapsed) consumedSeconds=\(consumed) excessSeconds=\(excess) availableSeconds=\(state.availableCreditSeconds)"
+        )
+        OutDoorLog.accounting(
+            "SESSION_ENDED id=\(session.id.uuidString) elapsedSeconds=\(elapsed) remainingAvailableSeconds=\(state.availableCreditSeconds)"
+        )
         return session
     }
 
