@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct WelcomeView: View {
+    @State private var notificationAuthorizationState = AllowanceReminderService.AuthorizationState.unknown
+
 #if DEBUG
     @State private var debugAccessExpiration = InstagramAccessStore.expirationDate
 #endif
@@ -26,6 +28,10 @@ struct WelcomeView: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal)
 
+            NotificationPermissionCard(
+                authorizationState: $notificationAuthorizationState
+            )
+
             Spacer()
 
 #if DEBUG
@@ -40,6 +46,68 @@ struct WelcomeView: View {
             .padding(.bottom, 32)
         }
         .padding()
+    }
+}
+
+private struct NotificationPermissionCard: View {
+    @Binding var authorizationState: AllowanceReminderService.AuthorizationState
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Allowance Reminder", systemImage: "bell")
+                .font(.headline)
+
+            Text(statusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if authorizationState == .notRequested {
+                Button("Enable Reminder Notifications") {
+                    requestAuthorization()
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .task {
+            authorizationState = await AllowanceReminderService.shared.authorizationState()
+        }
+    }
+
+    private var statusMessage: LocalizedStringResource {
+        switch authorizationState {
+        case .unknown:
+            "Checking notification permission…"
+        case .notRequested:
+            "Enable one reminder when your active Instagram allowance is exhausted."
+        case .authorized:
+            "Allowance reminders are enabled. Delivery and sound depend on your iPhone settings."
+        case .denied:
+            "Notifications are disabled. Usage accounting will continue without reminders."
+        case .provisional:
+            "Allowance reminders are provisionally enabled by iOS."
+        }
+    }
+
+    private func requestAuthorization() {
+        Task {
+            do {
+                errorMessage = nil
+                authorizationState = try await AllowanceReminderService.shared.requestAuthorization()
+            } catch {
+                errorMessage = error.localizedDescription
+                authorizationState = await AllowanceReminderService.shared.authorizationState()
+            }
+        }
     }
 }
 
