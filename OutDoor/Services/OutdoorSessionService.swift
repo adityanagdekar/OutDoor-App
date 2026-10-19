@@ -36,7 +36,7 @@ final class OutdoorSessionService {
     /// Number of sequential unhealthy fixes required before abandoning GPS.
     static let requiredConsecutiveBadFixes = 3
 
-    /// Longest allowed foreground interval without a healthy GPS fix.
+    /// Longest allowed active-session interval without a healthy GPS fix.
     static let maximumTimeWithoutGoodFix: TimeInterval = 12
 
     /// Default verified-walking goal: 30 minutes.
@@ -141,7 +141,7 @@ final class OutdoorSessionService {
         locationService.requestWhenInUseAuthorization()
     }
 
-    /// Requests permissions and starts a fresh foreground walking session.
+    /// Requests permissions and starts a walking session that may continue in the background.
     func startSession() {
         guard sessionState == .ready || sessionState == .completed else {
             return
@@ -212,6 +212,15 @@ final class OutdoorSessionService {
         motionService.stopUpdates()
         sessionState = .completed
         walkingActivityState = .completed
+    }
+
+    /// Reconciles delayed timer delivery without pausing an active background session.
+    func reconcileActiveSessionTime(at date: Date = Date()) {
+        guard sessionState == .active else {
+            return
+        }
+
+        updateTimeAccounting(at: date)
     }
 
     /// Keeps an inactive session open without awarding time until walking resumes.
@@ -327,10 +336,14 @@ final class OutdoorSessionService {
         }
 
         let evidenceDate = motionService.lastUpdateDate ?? now
+
+        // Account the preceding interval against the previous evidence first.
+        // This prevents a delayed callback from retroactively marking a long
+        // background gap as verified walking.
+        setWalkingVerification(true, at: now)
         lastMovementEvidenceDate = evidenceDate
         shouldShowInactivityActions = false
         hasProlongedInactivity = false
-        setWalkingVerification(true, at: now)
         scheduleMovementTimeout(after: evidenceDate)
     }
 
@@ -437,7 +450,7 @@ final class OutdoorSessionService {
         walkingActivityState = .ready
     }
 
-    /// Starts a foreground-only ticker for active-session time accounting.
+    /// Starts a timestamp-based ticker; correctness does not depend on one-second delivery.
     private func beginTimeAccounting(at date: Date) {
         stopTimeAccounting()
         lastTimeAccountingDate = date
@@ -472,7 +485,21 @@ final class OutdoorSessionService {
 
         switch walkingActivityState {
         case .walking:
-            verifiedWalkingTime += elapsed
+            let verificationDeadline = lastMovementEvidenceDate?
+                .addingTimeInterval(Self.movementGracePeriod)
+                ?? lastTimeAccountingDate
+            let verifiedEnd = min(date, verificationDeadline)
+            let verifiedInterval = max(
+                0,
+                verifiedEnd.timeIntervalSince(lastTimeAccountingDate)
+            )
+
+            verifiedWalkingTime += min(verifiedInterval, elapsed)
+            stationaryTime += max(0, elapsed - verifiedInterval)
+
+            if date >= verificationDeadline {
+                walkingActivityState = .stationary
+            }
         case .acquiringMovement, .stationary:
             stationaryTime += elapsed
         case .ready, .paused, .completed:
@@ -492,14 +519,14 @@ final class OutdoorSessionService {
         walkingActivityState = isVerified ? .walking : .stationary
     }
 
-    /// Stops the timer so paused, background, and completed time cannot be counted.
+    /// Stops accounting so explicitly paused and completed time cannot be counted.
     private func stopTimeAccounting() {
         timeAccountingTask?.cancel()
         timeAccountingTask = nil
         lastTimeAccountingDate = nil
     }
 
-    /// Clears reliability evidence before a new foreground tracking period.
+    /// Clears reliability evidence before a new active tracking period.
     private func resetGPSReliability() {
         cancelReliabilityTimeout()
         gpsReliability = .acquiring

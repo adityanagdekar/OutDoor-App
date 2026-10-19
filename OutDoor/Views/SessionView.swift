@@ -61,7 +61,7 @@ struct SessionView: View {
             sessionService.requestMapLocation()
         }
         .onChange(of: scenePhase) {
-            handleScenePhaseChange()
+            sessionService.reconcileActiveSessionTime()
         }
         .onDisappear {
             abandonSessionIfNeeded()
@@ -76,16 +76,6 @@ struct SessionView: View {
         }
 
         sessionService.endSession()
-    }
-
-    /// Pauses both foreground sensor streams when the app enters the background.
-    private func handleScenePhaseChange() {
-        guard scenePhase == .background,
-              sessionService.sessionState == .active else {
-            return
-        }
-
-        sessionService.pauseSession()
     }
 
     /// Ends a session when leaving this screen, except during challenge presentation.

@@ -33,7 +33,7 @@ final class LocationService: NSObject {
     @ObservationIgnored var onGPSFixEvaluated: ((Bool, Date) -> Void)?
     @ObservationIgnored var onGPSFailure: (() -> Void)?
 
-    /// Creates and configures the Core Location manager for foreground fitness tracking.
+    /// Creates and configures the Core Location manager for continuous fitness tracking.
     override init() {
         let manager = CLLocationManager()
         locationManager = manager
@@ -46,7 +46,10 @@ final class LocationService: NSObject {
         manager.desiredAccuracy = kCLLocationAccuracyBest
         manager.distanceFilter = kCLDistanceFilterNone
         manager.activityType = .fitness
-        manager.pausesLocationUpdatesAutomatically = true
+        // Session-level movement detection decides when tracking pauses. Allowing Core
+        // Location to pause itself could prevent a When In Use session from restarting
+        // until the app returns to the foreground.
+        manager.pausesLocationUpdatesAutomatically = false
         manager.allowsBackgroundLocationUpdates = false
     }
 
@@ -83,7 +86,7 @@ final class LocationService: NSObject {
         beginTrackingIfPossible()
     }
 
-    /// Pauses the active session and stops foreground location updates.
+    /// Pauses the active session and disables foreground and background location updates.
     func pauseSession() {
         guard isSessionActive else {
             return
@@ -146,7 +149,7 @@ final class LocationService: NSObject {
             trackingState = .permissionRestricted
         case .authorizedWhenInUse, .authorizedAlways:
             trackingState = .waitingForAccurateFix
-            locationManager.startUpdatingLocation()
+            startLocationUpdates()
         @unknown default:
             stopLocationUpdates()
             trackingState = .locationUnavailable
@@ -270,9 +273,18 @@ final class LocationService: NSObject {
         locationError = nil
     }
 
-    /// Stops the underlying Core Location update stream.
+    /// Enables continuous delivery for a session that starts or resumes in the foreground.
+    private func startLocationUpdates() {
+        locationManager.activityType = .fitness
+        locationManager.pausesLocationUpdatesAutomatically = false
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.startUpdatingLocation()
+    }
+
+    /// Stops the update stream and removes background-location eligibility.
     private func stopLocationUpdates() {
         locationManager.stopUpdatingLocation()
+        locationManager.allowsBackgroundLocationUpdates = false
     }
 
     /// Maps the current authorization status to the service's initial tracking state.
