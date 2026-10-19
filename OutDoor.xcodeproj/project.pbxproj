@@ -10,9 +10,22 @@
 		48D0D6DD307C458B002B80D0 /* OutDoor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OutDoor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		483F12663085CE2D002B7805 /* Exceptions for "OutDoor" folder in "OutDoor" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 48D0D6DC307C458B002B80D0 /* OutDoor */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		48D0D6DF307C458B002B80D0 /* OutDoor */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				483F12663085CE2D002B7805 /* Exceptions for "OutDoor" folder in "OutDoor" target */,
+			);
 			path = OutDoor;
 			sourceTree = "<group>";
 		};
@@ -241,6 +254,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = OutDoor/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "OutDoor uses the camera to capture photos for outdoor challenges.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OutDoor uses your location during outdoor sessions to map your walk, calculate distance, and verify outdoor activity";
 				INFOPLIST_KEY_NSMotionUsageDescription = "OutDoor uses motion activity during outdoor sessions to estimate walking distance when GPS accuracy is limited.";
@@ -293,6 +307,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = OutDoor/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "OutDoor uses the camera to capture photos for outdoor challenges.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OutDoor uses your location during outdoor sessions to map your walk, calculate distance, and verify outdoor activity";
 				INFOPLIST_KEY_NSMotionUsageDescription = "OutDoor uses motion activity during outdoor sessions to estimate walking distance when GPS accuracy is limited.";
