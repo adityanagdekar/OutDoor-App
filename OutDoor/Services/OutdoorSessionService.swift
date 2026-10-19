@@ -60,6 +60,9 @@ final class OutdoorSessionService {
     /// Smallest positive live cadence treated as walking, in steps per second.
     static let minimumWalkingCadence: Double = 0.2
 
+    /// Minimum interval between automatic active-session recovery snapshots.
+    static let persistenceInterval: TimeInterval = 10
+
     let locationService: LocationService
     let motionService: MotionService
 
@@ -72,7 +75,11 @@ final class OutdoorSessionService {
     private(set) var verifiedWalkingTime: TimeInterval = 0
     private(set) var stationaryTime: TimeInterval = 0
     private(set) var goalDuration: TimeInterval = OutdoorSessionService.defaultGoalDuration
+    private(set) var sessionID: UUID?
+    private(set) var sessionStartDate: Date?
 
+    private let persistenceStore: OutdoorSessionPersistenceStore
+    private var lastPersistenceDate: Date?
     private var consecutiveGoodFixes = 0
     private var consecutiveBadFixes = 0
     private var lastGoodFixDate: Date?
@@ -118,17 +125,22 @@ final class OutdoorSessionService {
     init() {
         locationService = LocationService()
         motionService = MotionService()
+        persistenceStore = OutdoorSessionPersistenceStore()
         configureSensorCallbacks()
+        restorePersistedSessionIfAvailable()
     }
 
     /// Creates a coordinator with injected sensor services for testing or previews.
     init(
         locationService: LocationService,
-        motionService: MotionService
+        motionService: MotionService,
+        persistenceStore: OutdoorSessionPersistenceStore = OutdoorSessionPersistenceStore()
     ) {
         self.locationService = locationService
         self.motionService = motionService
+        self.persistenceStore = persistenceStore
         configureSensorCallbacks()
+        restorePersistedSessionIfAvailable()
     }
 
     /// Requests a map-position fix without beginning an outdoor session.
@@ -156,10 +168,14 @@ final class OutdoorSessionService {
         motionService.requestAuthorization()
 
         let startDate = Date()
+        sessionID = UUID()
+        sessionStartDate = startDate
+        lastPersistenceDate = nil
         beginTimeAccounting(at: startDate)
         motionService.startUpdates(from: startDate)
         resetMovementDetection(at: startDate)
         locationService.startSession()
+        persistSession(at: startDate, force: true)
     }
 
     /// Accounts through the pause timestamp, then pauses both sensor services.
@@ -176,6 +192,7 @@ final class OutdoorSessionService {
         motionService.pauseUpdates()
         sessionState = .paused
         walkingActivityState = .paused
+        persistSession(force: true)
     }
 
     /// Resumes both sensors with fresh movement baselines and GPS acquisition.
@@ -193,6 +210,7 @@ final class OutdoorSessionService {
         motionService.resumeUpdates(from: resumeDate)
         resetMovementDetection(at: resumeDate)
         locationService.resumeSession()
+        persistSession(at: resumeDate, force: true)
     }
 
     /// Finalizes earned walking time and stops both sensor streams.
@@ -212,6 +230,10 @@ final class OutdoorSessionService {
         motionService.stopUpdates()
         sessionState = .completed
         walkingActivityState = .completed
+        clearPersistedSession()
+        sessionID = nil
+        sessionStartDate = nil
+        lastPersistenceDate = nil
     }
 
     /// Reconciles delayed timer delivery without pausing an active background session.
@@ -221,6 +243,7 @@ final class OutdoorSessionService {
         }
 
         updateTimeAccounting(at: date)
+        persistSession(at: date, force: true)
     }
 
     /// Keeps an inactive session open without awarding time until walking resumes.
@@ -261,6 +284,7 @@ final class OutdoorSessionService {
         }
 
         evaluatePedometerMovement()
+        persistSession()
     }
 
     /// Updates consecutive-fix counters and promotes or demotes GPS reliability.
@@ -268,6 +292,11 @@ final class OutdoorSessionService {
         guard sessionState == .active else {
             return
         }
+
+        // Location delivery also acts as a background wake-up checkpoint when
+        // timer callbacks have been deferred by the system.
+        updateTimeAccounting(at: observedAt)
+        persistSession(at: observedAt)
 
         if isGood {
             consecutiveGoodFixes += 1
@@ -507,6 +536,7 @@ final class OutdoorSessionService {
         }
 
         self.lastTimeAccountingDate = date
+        persistSession(at: date)
     }
 
     /// Changes the walking classification without losing time at the transition.
@@ -568,6 +598,100 @@ final class OutdoorSessionService {
     private func cancelReliabilityTimeout() {
         reliabilityTimeoutTask?.cancel()
         reliabilityTimeoutTask = nil
+    }
+
+    /// Saves a compact recovery snapshot at a controlled interval.
+    private func persistSession(at date: Date = Date(), force: Bool = false) {
+        guard sessionState == .active || sessionState == .paused,
+              let sessionID,
+              let sessionStartDate else {
+            return
+        }
+
+        if !force,
+           let lastPersistenceDate,
+           date.timeIntervalSince(lastPersistenceDate) < Self.persistenceInterval {
+            return
+        }
+
+        let snapshot = OutdoorSessionSnapshot(
+            sessionID: sessionID,
+            startTimestamp: sessionStartDate,
+            savedAt: date,
+            elapsedSessionTime: max(0, elapsedSessionTime),
+            verifiedWalkingTime: max(0, verifiedWalkingTime),
+            stationaryTime: max(0, stationaryTime),
+            lastMovementTimestamp: lastMovementEvidenceDate,
+            pedometerStepBaseline: max(0, lastObservedStepCount),
+            pedometerDistanceBaseline: max(0, lastObservedPedometerDistance),
+            estimatedDistance: max(0, estimatedDistance),
+            activityState: walkingActivityState,
+            wasPaused: sessionState == .paused
+        )
+
+        do {
+            try persistenceStore.save(snapshot)
+            lastPersistenceDate = date
+            OutDoorLog.outdoorSession(
+                "SESSION_SNAPSHOT_SAVED id=\(sessionID.uuidString) verifiedSeconds=\(snapshot.verifiedWalkingTime) distance=\(snapshot.estimatedDistance) activity=\(snapshot.activityState.rawValue)"
+            )
+        } catch {
+            OutDoorLog.error(
+                "OutdoorSession",
+                "SESSION_SNAPSHOT_SAVE_FAILED id=\(sessionID.uuidString) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Restores a terminated session as paused so unavailable time is never rewarded.
+    private func restorePersistedSessionIfAvailable() {
+        do {
+            guard let snapshot = try persistenceStore.load() else {
+                return
+            }
+
+            sessionID = snapshot.sessionID
+            sessionStartDate = snapshot.startTimestamp
+            elapsedSessionTime = max(0, snapshot.elapsedSessionTime)
+            verifiedWalkingTime = max(0, snapshot.verifiedWalkingTime)
+            stationaryTime = max(0, snapshot.stationaryTime)
+            lastMovementEvidenceDate = snapshot.lastMovementTimestamp
+            lastObservedStepCount = max(0, snapshot.pedometerStepBaseline)
+            lastObservedPedometerDistance = max(0, snapshot.pedometerDistanceBaseline)
+            lastPersistenceDate = snapshot.savedAt
+
+            motionService.restorePausedMeasurements(
+                stepCount: snapshot.pedometerStepBaseline,
+                distance: snapshot.estimatedDistance,
+                lastUpdateDate: snapshot.lastMovementTimestamp
+            )
+            locationService.restorePausedSession()
+            sessionState = .paused
+            walkingActivityState = .paused
+            resetGPSReliability()
+
+            OutDoorLog.outdoorSession(
+                "SESSION_SNAPSHOT_RESTORED id=\(snapshot.sessionID.uuidString) savedActivity=\(snapshot.activityState.rawValue) verifiedSeconds=\(verifiedWalkingTime) distance=\(estimatedDistance)"
+            )
+        } catch {
+            OutDoorLog.error(
+                "OutdoorSession",
+                "SESSION_SNAPSHOT_RESTORE_FAILED error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Removes recovery data once the user explicitly completes the session.
+    private func clearPersistedSession() {
+        do {
+            try persistenceStore.clear()
+            OutDoorLog.outdoorSession("SESSION_SNAPSHOT_CLEARED")
+        } catch {
+            OutDoorLog.error(
+                "OutdoorSession",
+                "SESSION_SNAPSHOT_CLEAR_FAILED error=\(error.localizedDescription)"
+            )
+        }
     }
 
 }

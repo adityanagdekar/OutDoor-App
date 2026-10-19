@@ -9,6 +9,7 @@ nonisolated enum OutDoorLog {
     private static let reminderLogger = Logger(subsystem: subsystem, category: "AllowanceReminder")
     private static let insightsLogger = Logger(subsystem: subsystem, category: "Insights")
     private static let debugLogger = Logger(subsystem: subsystem, category: "DebugControls")
+    private static let outdoorSessionLogger = Logger(subsystem: subsystem, category: "OutdoorSession")
 
     /// Records persistent accounting reads, writes, grants, starts, and finalizations.
     static func accounting(_ message: String) {
@@ -33,6 +34,11 @@ nonisolated enum OutDoorLog {
     /// Records explicit DEBUG credit and reset actions.
     static func debug(_ message: String) {
         debugLogger.notice("\(message, privacy: .public)")
+    }
+
+    /// Records outdoor-session persistence and recovery checkpoints.
+    static func outdoorSession(_ message: String) {
+        outdoorSessionLogger.notice("\(message, privacy: .public)")
     }
 
     /// Records failures at any checkpoint without swallowing the original error.

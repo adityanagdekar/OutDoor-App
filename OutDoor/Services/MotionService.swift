@@ -130,6 +130,26 @@ final class MotionService {
         onUpdate?()
     }
 
+    /// Restores saved measurements as a paused baseline after process recovery.
+    func restorePausedMeasurements(
+        stepCount: Int,
+        distance: Double,
+        lastUpdateDate: Date?
+    ) {
+        stopPedometerStream()
+        committedStepCount = max(stepCount, 0)
+        committedDistance = max(distance, 0)
+        intervalStepCount = 0
+        intervalDistance = 0
+        self.stepCount = committedStepCount
+        pedometerDistance = committedDistance
+        currentCadence = nil
+        self.lastUpdateDate = lastUpdateDate
+        motionError = nil
+        activityState = .paused
+        onUpdate?()
+    }
+
     /// Stops pedometer delivery and preserves the final values for session results.
     func stopUpdates() {
         if activityState == .active {

@@ -1,4 +1,4 @@
-enum WalkingActivityState: Equatable {
+enum WalkingActivityState: String, Codable, Equatable, Sendable {
     /// The session is prepared but has not started.
     case ready
 

@@ -97,6 +97,14 @@ final class LocationService: NSObject {
         trackingState = .paused
     }
 
+    /// Restores session ownership without restarting sensors after process recovery.
+    func restorePausedSession() {
+        stopLocationUpdates()
+        isSessionActive = true
+        lastReliabilityFix = nil
+        trackingState = .paused
+    }
+
     /// Resumes location updates for a paused session when authorization permits.
     func resumeSession() {
         guard isSessionActive, trackingState == .paused else {
