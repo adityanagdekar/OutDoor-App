@@ -88,11 +88,13 @@ final class LocationService: NSObject {
 
     /// Pauses the active session and disables foreground and background location updates.
     func pauseSession() {
+        // Always stop defensively, even if coordinator and service state diverge.
+        stopLocationUpdates()
+
         guard isSessionActive else {
             return
         }
 
-        stopLocationUpdates()
         lastReliabilityFix = nil
         trackingState = .paused
     }
@@ -125,12 +127,10 @@ final class LocationService: NSObject {
 
     /// Completes the active session and stops all location updates.
     func endSession() {
-        guard isSessionActive else {
-            return
-        }
-
+        // End is idempotent and always removes background-location eligibility.
         isSessionActive = false
         stopLocationUpdates()
+        lastReliabilityFix = nil
         trackingState = .completed
     }
 

@@ -105,6 +105,8 @@ final class MotionService {
     /// Pauses pedometer delivery while preserving the session's accumulated values.
     func pauseUpdates() {
         guard activityState == .active else {
+            // Pause remains safe and idempotent if service state diverges.
+            stopPedometerStream()
             return
         }
 

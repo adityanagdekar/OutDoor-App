@@ -35,6 +35,11 @@ struct SessionView: View {
                     verifiedWalkingTime: sessionService.verifiedWalkingTime
                 )
 
+                if sessionService.sessionState == .active,
+                   sessionService.isLowPowerModeEnabled {
+                    LowPowerModeNotice()
+                }
+
                 Spacer()
 
                 SessionControls(
@@ -95,6 +100,20 @@ struct SessionView: View {
         }
 
         UIApplication.shared.open(url)
+    }
+}
+
+private struct LowPowerModeNotice: View {
+    var body: some View {
+        Label(
+            "Low Power Mode may reduce background update frequency. Tracking remains active, but updates can arrive later.",
+            systemImage: "battery.25percent"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

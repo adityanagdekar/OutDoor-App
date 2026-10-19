@@ -71,6 +71,7 @@ final class OutdoorSessionService {
     private(set) var walkingActivityState: WalkingActivityState = .ready
     private(set) var shouldShowInactivityActions = false
     private(set) var hasProlongedInactivity = false
+    private(set) var isLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
     private(set) var elapsedSessionTime: TimeInterval = 0
     private(set) var verifiedWalkingTime: TimeInterval = 0
     private(set) var stationaryTime: TimeInterval = 0
@@ -161,6 +162,7 @@ final class OutdoorSessionService {
 
         resetGPSReliability()
         resetTimeMetrics()
+        refreshSystemConditions()
         sessionState = .active
         walkingActivityState = .acquiringMovement
 
@@ -193,6 +195,7 @@ final class OutdoorSessionService {
         sessionState = .paused
         walkingActivityState = .paused
         persistSession(force: true)
+        OutDoorLog.outdoorSession("SESSION_EXPLICITLY_PAUSED sensorsStopped=true")
     }
 
     /// Resumes both sensors with fresh movement baselines and GPS acquisition.
@@ -230,6 +233,7 @@ final class OutdoorSessionService {
         motionService.stopUpdates()
         sessionState = .completed
         walkingActivityState = .completed
+        OutDoorLog.outdoorSession("SESSION_EXPLICITLY_ENDED sensorsStopped=true")
         clearPersistedSession()
         sessionID = nil
         sessionStartDate = nil
@@ -238,6 +242,8 @@ final class OutdoorSessionService {
 
     /// Reconciles delayed timer delivery without pausing an active background session.
     func reconcileActiveSessionTime(at date: Date = Date()) {
+        refreshSystemConditions()
+
         guard sessionState == .active else {
             return
         }
@@ -679,6 +685,20 @@ final class OutdoorSessionService {
                 "SESSION_SNAPSHOT_RESTORE_FAILED error=\(error.localizedDescription)"
             )
         }
+    }
+
+    /// Refreshes system conditions that can affect background update frequency.
+    private func refreshSystemConditions() {
+        let lowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
+
+        guard lowPowerModeEnabled != isLowPowerModeEnabled else {
+            return
+        }
+
+        isLowPowerModeEnabled = lowPowerModeEnabled
+        OutDoorLog.outdoorSession(
+            "LOW_POWER_MODE_CHANGED enabled=\(lowPowerModeEnabled)"
+        )
     }
 
     /// Removes recovery data once the user explicitly completes the session.
