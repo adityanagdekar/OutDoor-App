@@ -148,6 +148,13 @@ private struct InstagramAccountingDebugControls: View {
             }
             .font(.caption)
             .disabled(isWorking)
+
+            Button("Add 5 Minutes TEST Walking") {
+                grantTestWalkingCredit()
+            }
+            .buttonStyle(.borderedProminent)
+            .font(.caption)
+            .disabled(isWorking)
         }
         .frame(maxWidth: .infinity)
         .padding()
@@ -172,6 +179,31 @@ private struct InstagramAccountingDebugControls: View {
             } catch {
                 statusMessage = error.localizedDescription
                 OutDoorLog.error("DebugControls", "GRANT_TEST_CREDIT_FAILED error=\(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func grantTestWalkingCredit() {
+        Task {
+            OutDoorLog.debug("GRANT_TEST_WALKING_BUTTON_TAPPED seconds=300")
+            isWorking = true
+            defer { isWorking = false }
+
+            do {
+                let entry = try await InstagramAccountingStore.shared.grantVerifiedWalkingCredit(
+                    seconds: 300
+                )
+                statusMessage = "Added 5 minutes of TEST walking and Instagram credit."
+                OutDoorLog.debug(
+                    "GRANT_TEST_WALKING_COMPLETED entryID=\(entry.id.uuidString) seconds=\(entry.durationSeconds)"
+                )
+                onAccountingChanged()
+            } catch {
+                statusMessage = error.localizedDescription
+                OutDoorLog.error(
+                    "DebugControls",
+                    "GRANT_TEST_WALKING_FAILED error=\(error.localizedDescription)"
+                )
             }
         }
     }

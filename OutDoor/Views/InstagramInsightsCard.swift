@@ -24,7 +24,7 @@ struct InstagramInsightsCard: View {
             )
             InsightsValueRow(
                 title: "Verified walking today",
-                value: "Not connected yet"
+                value: formattedMinutes(snapshot.verifiedWalkingTodaySeconds)
             )
 
             Text("Instagram values are estimated from Shortcuts.")
@@ -66,7 +66,7 @@ struct InstagramInsightsCard: View {
             snapshot = try await InstagramAccountingStore.shared.insights()
             errorMessage = nil
             OutDoorLog.insights(
-                "INSIGHTS_UI_REFRESHED availableSeconds=\(snapshot.availableCreditSeconds) usageTodaySeconds=\(snapshot.estimatedUsageTodaySeconds) excessTodaySeconds=\(snapshot.estimatedExcessTodaySeconds)"
+                "INSIGHTS_UI_REFRESHED availableSeconds=\(snapshot.availableCreditSeconds) usageTodaySeconds=\(snapshot.estimatedUsageTodaySeconds) excessTodaySeconds=\(snapshot.estimatedExcessTodaySeconds) verifiedWalkingTodaySeconds=\(snapshot.verifiedWalkingTodaySeconds)"
             )
         } catch {
             errorMessage = error.localizedDescription

@@ -91,6 +91,14 @@ actor InstagramAccountingStore {
 
         var usageToday: TimeInterval = 0
         var excessToday: TimeInterval = 0
+        let verifiedWalkingToday = state.verifiedWalkingEntries.reduce(0) { total, entry in
+            guard dayInterval.contains(entry.earnedAt),
+                  entry.durationSeconds.isFinite else {
+                return total
+            }
+
+            return total + max(0, entry.durationSeconds)
+        }
 
         for session in state.completedSessions where session.status == .finalized {
             let endTimestamp = session.endTimestamp ?? session.startTimestamp
@@ -140,10 +148,11 @@ actor InstagramAccountingStore {
         let snapshot = InstagramInsightsSnapshot(
             availableCreditSeconds: effectiveAvailableCredit,
             estimatedUsageTodaySeconds: usageToday,
-            estimatedExcessTodaySeconds: excessToday
+            estimatedExcessTodaySeconds: excessToday,
+            verifiedWalkingTodaySeconds: verifiedWalkingToday
         )
         OutDoorLog.insights(
-            "INSIGHTS_CALCULATED availableSeconds=\(snapshot.availableCreditSeconds) usageTodaySeconds=\(snapshot.estimatedUsageTodaySeconds) excessTodaySeconds=\(snapshot.estimatedExcessTodaySeconds) activeSessionID=\(state.activeSession?.id.uuidString ?? "none")"
+            "INSIGHTS_CALCULATED availableSeconds=\(snapshot.availableCreditSeconds) usageTodaySeconds=\(snapshot.estimatedUsageTodaySeconds) excessTodaySeconds=\(snapshot.estimatedExcessTodaySeconds) verifiedWalkingTodaySeconds=\(snapshot.verifiedWalkingTodaySeconds) activeSessionID=\(state.activeSession?.id.uuidString ?? "none")"
         )
         return snapshot
     }

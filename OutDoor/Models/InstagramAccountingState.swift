@@ -68,12 +68,14 @@ nonisolated struct InstagramInsightsSnapshot: Equatable, Sendable {
     static let empty = InstagramInsightsSnapshot(
         availableCreditSeconds: 0,
         estimatedUsageTodaySeconds: 0,
-        estimatedExcessTodaySeconds: 0
+        estimatedExcessTodaySeconds: 0,
+        verifiedWalkingTodaySeconds: 0
     )
 
     let availableCreditSeconds: TimeInterval
     let estimatedUsageTodaySeconds: TimeInterval
     let estimatedExcessTodaySeconds: TimeInterval
+    let verifiedWalkingTodaySeconds: TimeInterval
 }
 
 /// The result of attempting to begin or reuse an Instagram session.
