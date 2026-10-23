@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "outdoor-backend"
+version = "0.1.0"
+description = "OutDoor challenge API foundation"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27,<1",
+    "Pillow>=11.3,<13",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "pydantic-settings>=2.5,<3",
+    "python-multipart>=0.0.20,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
