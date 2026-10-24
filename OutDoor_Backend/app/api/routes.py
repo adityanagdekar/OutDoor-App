@@ -8,6 +8,7 @@ from fastapi.security import HTTPBearer
 from starlette.concurrency import run_in_threadpool
 
 from ..errors import APIError
+from .uploads import PrivateUploadRoute
 from ..schemas import (
     TOPICS, Challenge, ChallengeBatch, ErrorResponse, GenerateRequest,
     RegenerateRequest, TopicsResponse, Verification,
@@ -18,7 +19,8 @@ responses = {
     for status in (400, 401, 404, 409, 413, 415, 422, 500, 502, 503, 504)
 }
 router = APIRouter(
-    prefix="/api/v1", dependencies=[Depends(HTTPBearer(auto_error=False))], responses=responses
+    prefix="/api/v1", dependencies=[Depends(HTTPBearer(auto_error=False))], responses=responses,
+    route_class=PrivateUploadRoute,
 )
 
 
@@ -75,6 +77,9 @@ async def verify_photo(challenge_id: Identifier, request: Request, key: Key, pho
             image.extend(chunk)
             if len(image) > limit:
                 raise APIError(413, "image_too_large", "Image exceeds the configured byte limit.")
+        # Processing/provider calls use memory, so remove the original disk
+        # copy immediately rather than retaining it throughout the AI request.
+        await photo.close()
         if not image:
             raise APIError(422, "empty_image", "The photo is empty.")
         # Early signature rejection; the worker also validates actual content.
@@ -88,6 +93,6 @@ async def verify_photo(challenge_id: Identifier, request: Request, key: Key, pho
         result = await run_in_threadpool(request.app.state.service.verify, challenge_id, bytes(image), content_type, key)
         return mutation_response(result)
     finally:
-        # Also closes/deletes FastAPI's spooled temporary upload on errors.
+        # Also closes/deletes the private temporary upload on errors.
         with CancelScope(shield=True):
             await photo.close()

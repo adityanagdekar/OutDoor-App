@@ -124,4 +124,6 @@ class OpenRouterVerificationProvider(DisabledProvider):
             assessment = GemmaAssessment.model_validate_json(content)
         except (ValueError, KeyError, IndexError, TypeError, AttributeError, RecursionError, ValidationError):
             raise APIError(502, "invalid_provider_response", "The verification provider returned an invalid assessment. Retry with the same key.") from None
-        return dict(assessment.model_dump(), is_mock=False)
+        # Model identity comes from the API envelope, not the model's JSON text.
+        # The service validates this metadata before writing the attempt.
+        return dict(assessment.model_dump(), is_mock=False, model_id=result.get("model") or payload["model"])

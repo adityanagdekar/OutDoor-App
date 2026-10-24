@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     max_image_pixels: int = Field(default=20_000_000, gt=0)
     image_max_dimension: int = Field(default=1600, gt=0)
     image_jpeg_quality: int = Field(default=80, ge=1, le=95)
+    temp_image_directory: Path = Path("data/tmp_images")
+    temp_max_age_seconds: int = Field(default=3600, gt=0)
+    temp_cleanup_interval_seconds: int = Field(default=60, gt=0, le=3600)
 
     @model_validator(mode="after")
     def check_limits(self):

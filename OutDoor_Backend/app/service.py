@@ -3,7 +3,7 @@ import json
 
 from pydantic import BaseModel, Field, ValidationError
 
-from .database import Database
+from .database import Database, now
 from .errors import APIError
 from .provider import ChallengeProvider
 from .schemas import Challenge, ChallengeBatch, ProviderAssessment, Verification
@@ -15,6 +15,7 @@ class GeneratedChallenge(BaseModel):
     instruction: str = Field(min_length=1, max_length=1500)
     criteria: str = Field(min_length=1, max_length=2000)
     is_mock: bool
+    model_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 def fingerprint(value):
@@ -80,7 +81,7 @@ class ChallengeService:
             def save(db):
                 self.require_assigned(self.database.get_challenge(challenge_id, db))
                 replacement = self.database.insert_challenge(db, item.model_dump(mode="json"), replaces_id=challenge_id)
-                db.execute("UPDATE challenges SET status = 'replaced', replaced_by_id = ? WHERE id = ?", (replacement["id"], challenge_id))
+                db.execute("UPDATE challenges SET status = 'replaced', replaced_by_id = ?, updated_at = ? WHERE id = ?", (replacement["id"], now(), challenge_id))
                 return 201, Challenge.model_validate(replacement).model_dump(mode="json")
             return save
 

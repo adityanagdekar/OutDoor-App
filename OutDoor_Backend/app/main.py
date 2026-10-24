@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
+import anyio
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from .api.routes import router
 from .config import Settings
@@ -13,11 +15,13 @@ from .images import ImageProcessor
 from .provider import DisabledProvider, MockProvider
 from .service import ChallengeService
 from .verification_provider import OpenRouterVerificationProvider
+from .temporary_images import TemporaryImageStore
 
 
 def create_app(settings: Settings | None = None, provider=None):
     settings = settings or Settings()
     database = Database(settings.database_path)
+    temporary_images = TemporaryImageStore(settings)
     if provider is None:
         if settings.provider_mode == "openrouter":
             provider = OpenRouterVerificationProvider(settings)
@@ -28,14 +32,21 @@ def create_app(settings: Settings | None = None, provider=None):
 
     @asynccontextmanager
     async def lifespan(app):
+        await run_in_threadpool(temporary_images.initialize)
         database.initialize()
         if isinstance(provider, OpenRouterVerificationProvider):
             await provider.start()
         try:
-            yield
+            async with anyio.create_task_group() as cleanup_tasks:
+                cleanup_tasks.start_soon(temporary_images.run_cleanup)
+                try:
+                    yield
+                finally:
+                    cleanup_tasks.cancel_scope.cancel()
         finally:
             if isinstance(provider, OpenRouterVerificationProvider):
-                await provider.close()
+                with anyio.CancelScope(shield=True):
+                    await provider.close()
 
     app = FastAPI(
         title="OutDoor challenge API", version="0.1.0", lifespan=lifespan,
@@ -43,6 +54,7 @@ def create_app(settings: Settings | None = None, provider=None):
     )
     app.state.settings = settings
     app.state.database = database
+    app.state.temporary_images = temporary_images
     app.state.service = ChallengeService(database, provider, ImageProcessor(settings))
     app.add_middleware(RequestBoundaryMiddleware, settings=settings)
 

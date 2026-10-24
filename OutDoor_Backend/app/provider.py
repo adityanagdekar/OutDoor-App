@@ -29,6 +29,7 @@ class MockProvider:
                 "instruction": "Photograph an example from this topic from a safe public place. Avoid identifiable people and do not disturb animals.",
                 "criteria": "Mock assignment only; no AI criteria were generated.",
                 "is_mock": True,
+                "model_id": "mock",
             }
             for i in range(count)
         ]
@@ -40,4 +41,5 @@ class MockProvider:
             "reason": "MOCK response: this image has not been analyzed by an AI model.",
             "detected_objects": [],
             "is_mock": True,
+            "model_id": "mock",
         }

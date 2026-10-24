@@ -65,11 +65,15 @@ class GemmaAssessment(BaseModel):
 
 class ProviderAssessment(GemmaAssessment):
     is_mock: bool
+    # Set by the provider adapter, never requested from the language model.
+    model_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None
 
 
-class Verification(ProviderAssessment):
+class Verification(GemmaAssessment):
     # Public records are loaded from SQLite, whose timestamps are strings.
-    model_config = ConfigDict(extra="forbid", strict=False)
+    # Storage-only metadata (such as model_id) stays out of the public contract.
+    model_config = ConfigDict(extra="ignore", strict=False)
+    is_mock: bool
     attempt_id: int
     challenge_id: int
     created_at: datetime
