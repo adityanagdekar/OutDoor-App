@@ -249,14 +249,27 @@ actor InstagramAccountingStore {
     @discardableResult
     func grantVerifiedWalkingCredit(
         seconds: TimeInterval,
-        earnedAt: Date = Date()
+        earnedAt: Date = Date(),
+        outdoorSessionID: UUID? = nil
     ) throws -> WalkingCreditEntry {
         guard seconds.isFinite, seconds > 0 else {
             throw StoreError.invalidCreditDuration
         }
 
         var state = try loadState()
+
+        if let outdoorSessionID,
+           let existingEntry = state.verifiedWalkingEntries.first(where: {
+               $0.outdoorSessionID == outdoorSessionID
+           }) {
+            OutDoorLog.accounting(
+                "WALKING_CREDIT_DUPLICATE_SKIPPED sessionID=\(outdoorSessionID.uuidString) entryID=\(existingEntry.id.uuidString)"
+            )
+            return existingEntry
+        }
+
         let entry = WalkingCreditEntry(
+            outdoorSessionID: outdoorSessionID,
             earnedAt: earnedAt,
             durationSeconds: seconds
         )
@@ -266,7 +279,7 @@ actor InstagramAccountingStore {
 
         try saveState(state)
         OutDoorLog.accounting(
-            "WALKING_CREDIT_GRANTED entryID=\(entry.id.uuidString) seconds=\(seconds) availableSeconds=\(state.availableCreditSeconds)"
+            "WALKING_CREDIT_GRANTED entryID=\(entry.id.uuidString) outdoorSessionID=\(outdoorSessionID?.uuidString ?? "none") seconds=\(seconds) availableSeconds=\(state.availableCreditSeconds)"
         )
         return entry
     }

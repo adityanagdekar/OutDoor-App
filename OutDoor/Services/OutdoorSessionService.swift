@@ -217,7 +217,7 @@ final class OutdoorSessionService {
     }
 
     /// Finalizes earned walking time and stops both sensor streams.
-    func endSession() {
+    func endSession() async {
         guard sessionState == .active || sessionState == .paused else {
             return
         }
@@ -233,7 +233,37 @@ final class OutdoorSessionService {
         motionService.stopUpdates()
         sessionState = .completed
         walkingActivityState = .completed
-        OutDoorLog.outdoorSession("SESSION_EXPLICITLY_ENDED sensorsStopped=true")
+
+        let completedSessionID = sessionID
+        let completedWalkingTime = verifiedWalkingTime
+        let completedAt = Date()
+        OutDoorLog.outdoorSession(
+            "SESSION_EXPLICITLY_ENDED sessionID=\(completedSessionID?.uuidString ?? "none") verifiedWalkingSeconds=\(completedWalkingTime) sensorsStopped=true"
+        )
+
+        if let completedSessionID, completedWalkingTime >= 60 {
+            do {
+                let entry = try await InstagramAccountingStore.shared.grantVerifiedWalkingCredit(
+                    seconds: completedWalkingTime,
+                    earnedAt: completedAt,
+                    outdoorSessionID: completedSessionID
+                )
+                OutDoorLog.outdoorSession(
+                    "SESSION_WALKING_CREDIT_COMMITTED sessionID=\(completedSessionID.uuidString) entryID=\(entry.id.uuidString) seconds=\(entry.durationSeconds)"
+                )
+            } catch {
+                OutDoorLog.error(
+                    "OutdoorSession",
+                    "SESSION_WALKING_CREDIT_FAILED sessionID=\(completedSessionID.uuidString) error=\(error.localizedDescription)"
+                )
+                return
+            }
+        } else {
+            OutDoorLog.outdoorSession(
+                "SESSION_WALKING_CREDIT_SKIPPED sessionID=\(completedSessionID?.uuidString ?? "none") verifiedWalkingSeconds=\(completedWalkingTime) minimumSeconds=60"
+            )
+        }
+
         clearPersistedSession()
         sessionID = nil
         sessionStartDate = nil

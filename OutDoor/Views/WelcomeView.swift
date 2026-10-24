@@ -42,7 +42,9 @@ struct WelcomeView: View {
 #endif
 
             NavigationLink("START") {
-                SessionView()
+                SessionView {
+                    insightsRefreshID = UUID()
+                }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -135,17 +137,10 @@ private struct InstagramAccountingDebugControls: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
-            HStack {
-                Button("Grant 1 Minute TEST Credit") {
-                    grantTestCredit()
-                }
-                .buttonStyle(.bordered)
-
-                Button("Reset TEST Accounting", role: .destructive) {
-                    resetTestAccounting()
-                }
-                .buttonStyle(.bordered)
+            Button("Reset TEST Accounting", role: .destructive) {
+                resetTestAccounting()
             }
+            .buttonStyle(.bordered)
             .font(.caption)
             .disabled(isWorking)
 
@@ -160,27 +155,6 @@ private struct InstagramAccountingDebugControls: View {
         .padding()
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .accessibilityElement(children: .contain)
-    }
-
-    private func grantTestCredit() {
-        Task {
-            OutDoorLog.debug("GRANT_TEST_CREDIT_BUTTON_TAPPED seconds=60")
-            isWorking = true
-            defer { isWorking = false }
-
-            do {
-                let availableSeconds = try await InstagramAccountingStore.shared.grantTestCredit(
-                    seconds: 60
-                )
-                let availableMinutes = Int((availableSeconds / 60).rounded())
-                statusMessage = "Granted 1 minute of TEST credit. Available quota: \(availableMinutes) min."
-                OutDoorLog.debug("GRANT_TEST_CREDIT_COMPLETED availableSeconds=\(availableSeconds)")
-                onAccountingChanged()
-            } catch {
-                statusMessage = error.localizedDescription
-                OutDoorLog.error("DebugControls", "GRANT_TEST_CREDIT_FAILED error=\(error.localizedDescription)")
-            }
-        }
     }
 
     private func grantTestWalkingCredit() {

@@ -46,18 +46,21 @@ nonisolated struct InstagramSession: Codable, Identifiable, Sendable {
     }
 }
 
-/// A future verified-walking credit entry. Creating entries is not connected yet.
+/// A persisted verified-walking reward that also contributes Instagram credit.
 nonisolated struct WalkingCreditEntry: Codable, Identifiable, Sendable {
     let id: UUID
+    let outdoorSessionID: UUID?
     let earnedAt: Date
     let durationSeconds: TimeInterval
 
     init(
         id: UUID = UUID(),
+        outdoorSessionID: UUID? = nil,
         earnedAt: Date,
         durationSeconds: TimeInterval
     ) {
         self.id = id
+        self.outdoorSessionID = outdoorSessionID
         self.earnedAt = earnedAt
         self.durationSeconds = durationSeconds
     }

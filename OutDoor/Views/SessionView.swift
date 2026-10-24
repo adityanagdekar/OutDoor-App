@@ -6,6 +6,11 @@ struct SessionView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var sessionService = OutdoorSessionService()
     @State private var isShowingChallenges = false
+    let onSessionCompleted: () -> Void
+
+    init(onSessionCompleted: @escaping () -> Void = {}) {
+        self.onSessionCompleted = onSessionCompleted
+    }
 
     private var hasStartedSession: Bool {
         sessionService.sessionState != .ready
@@ -80,7 +85,10 @@ struct SessionView: View {
             return
         }
 
-        sessionService.endSession()
+        Task {
+            await sessionService.endSession()
+            onSessionCompleted()
+        }
     }
 
     /// Ends a session when leaving this screen, except during challenge presentation.
@@ -91,7 +99,10 @@ struct SessionView: View {
             return
         }
 
-        sessionService.endSession()
+        Task {
+            await sessionService.endSession()
+            onSessionCompleted()
+        }
     }
 
     private func openSettings() {
