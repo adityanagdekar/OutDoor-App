@@ -60,8 +60,6 @@ Configure `OUTDOOR_CLIENT_TOKEN` in `.env`. Set `OUTDOOR_PROVIDER_MODE=mock` for
 uvicorn app.main:app --reload
 ```
 
-API documentation: [Swagger UI](http://127.0.0.1:8000/docs)
-
 ## API
 
 | Method | Endpoint |
